@@ -1,5 +1,7 @@
 # VideoForge（vedio--generator）
 
+简体中文 | [English](README.en.md)
+
 [![CI](https://github.com/swhite-cn/vedio--generator/actions/workflows/ci.yml/badge.svg)](https://github.com/swhite-cn/vedio--generator/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22.19.0-brightgreen)](https://nodejs.org)

@@ -110,6 +110,6 @@ API 与 Web 需在两个独立终端启动。仓库当前没有统一 lint 命�
 
 - [开发者使用说明](docs/guides/developer-guide.md)
 - [操作者使用说明](docs/guides/operator-guide.md)
-- [本地 harness 设计（主文档）](本地视频流水线Agent-v2.md)
-- [Web 工作台设计（Web 专题）](本地视频流水线Agent-web-v2.md)
+- [本地 harness 设计（主文档）](docs/本地视频流水线Agent-v2.md)
+- [Web 工作台设计（Web 专题）](docs/本地视频流水线Agent-web-v2.md)
 - [重构实施计划](docs/superpowers/plans/2026-10-25-videoforge-harness-rebuild.md)

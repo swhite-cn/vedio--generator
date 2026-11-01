@@ -273,7 +273,6 @@ pnpm --filter @videoforge/cli start project:verify --project <项目 id>
 ## 11. 相关文档
 
 - [操作者使用说明](operator-guide.md)
-- [本地 harness 设计（主文档）](../../本地视频流水线Agent-v2.md)
-- [Web 工作台设计（Web 专题）](../../本地视频流水线Agent-web-v2.md)
+- [本地 harness 设计（主文档）](../本地视频流水线Agent-v2.md)
+- [Web 工作台设计（Web 专题）](../本地视频流水线Agent-web-v2.md)
 - [重构实施计划](../superpowers/plans/2026-10-25-videoforge-harness-rebuild.md)
-- [Windows 环境准备](../superpowers/specs/2026-09-29-windows-environment-setup.md)
