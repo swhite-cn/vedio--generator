@@ -14,7 +14,7 @@
     "@videoforge/shared": "workspace:*",
     "@videoforge/template-sdk": "workspace:*",
     "yaml": "^2.9.1",
-    "zod": "^4.6.5"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "typescript": "^7.0.2"
