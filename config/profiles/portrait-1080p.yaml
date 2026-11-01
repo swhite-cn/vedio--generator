@@ -1,0 +1,9 @@
+profile: PORTRAIT_1080P
+# 竖版 9:16 输出宽度。
+width: 1080
+# 竖版 9:16 输出高度。
+height: 1920
+# 输出帧率，单位为 fps。
+fps: 30
+# 字幕和标题的安全区比例。
+safe_area_ratio: 0.9

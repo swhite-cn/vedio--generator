@@ -1,0 +1,23 @@
+# 默认按 LF 存储，避免 Windows 贡献者产生整文件换行差异
+* text=auto eol=lf
+
+# PowerShell 脚本保持 CRLF，兼容 Windows PowerShell 5
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制资源不做换行转换与 diff
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.mp3 binary
+*.wav binary
+*.mp4 binary
+*.woff binary
+*.woff2 binary
+
+# 锁文件在 diff 中折叠展示
+pnpm-lock.yaml linguist-generated=true

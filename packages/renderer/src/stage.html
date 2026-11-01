@@ -1,0 +1,14 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8"><title>VideoForge Stage</title></head>
+  <body style="margin:0;overflow:hidden;background:#101827">
+    <div id="scene"></div>
+    <script>
+      window.__videoforge = {
+        update(timeMs) {
+          if (window.__videoforge.render) window.__videoforge.render(timeMs);
+        }
+      };
+    </script>
+  </body>
+</html>

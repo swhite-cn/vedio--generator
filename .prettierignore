@@ -1,0 +1,16 @@
+node_modules
+apps/web/dist
+coverage
+playwright-report
+test-results
+storage
+design-mockups
+pnpm-lock.yaml
+*.min.js
+packages/renderer/src/stage.html
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+*.log

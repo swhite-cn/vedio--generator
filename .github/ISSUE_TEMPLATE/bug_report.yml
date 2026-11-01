@@ -1,0 +1,72 @@
+name: Bug 报告
+description: 报告一个可复现的问题
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。提交前请先搜索是否已有同类 Issue。
+        **请勿粘贴真实 API Key、JWT_SECRET 或 `.env.local` 内容。**
+  - type: textarea
+    id: summary
+    attributes:
+      label: 问题描述
+      description: 发生了什么？期望的结果是什么？
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 启动 ...
+        2. 在工作台点击 ...
+        3. 观察到 ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: 影响范围
+      options:
+        - server / 工作流引擎
+        - agent / 阶段工具
+        - web 工作台
+        - CLI
+        - 配置 / 环境
+        - 文档
+        - 其他
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本 / 提交
+      description: 例如 `main@4ede85d` 或 `v0.1.0`
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 运行环境
+      placeholder: |
+        OS: Windows 11
+        Node: v22.19.0
+        pnpm: 10.x
+        ffmpeg: ...
+        Chromium: Playwright 管理
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志 / 截图（可选）
+      description: 请先移除密钥、令牌与个人信息。
+    validations:
+      required: false

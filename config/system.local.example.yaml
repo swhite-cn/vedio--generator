@@ -1,0 +1,62 @@
+server:
+  # Fastify API监听端口，范围为1-65535；服务当前仅绑定本机回环地址。
+  port: 3000
+  # JWT 密钥所在的环境变量名；密钥只允许存放在环境变量或 .env.local，
+  # 禁止写入本文件、数据库、日志或 manifest。
+  jwt_secret_env: "JWT_SECRET"
+  # 访问令牌有效期，格式为 <数字><h|m|s>，例如 12h / 30m / 45s。
+  access_token_ttl: "12h"
+  # 是否开放自助注册；关闭后仅能由 `cli db:user --create` 建号。
+  allow_registration: true
+  # admin 初始密码所在的环境变量名；变量未设置时回退内置默认口令；
+  # 属敏感值，不得写入本文件；仅在首次创建 admin 账号时读取一次。
+  admin_password_env: "VF_ADMIN_INITIAL_PASSWORD"
+  # 单用户项目数量上限，范围 1-1000；超限创建新项目返回 CONFIG_INVALID。
+  max_projects_per_user: 50
+
+runtime:
+  # 工件、SQLite 数据库与项目目录的根路径；相对路径以仓库根为基准，使用正斜杠以兼容 Windows。
+  # 如需更大容量磁盘可改为绝对路径，例如 "D:/videoforge-storage"。
+  storage_root: "storage"
+  # 阶段工具全局并发上限，最小为 1；单机保持为 1，避免 Chromium/GPU/磁盘竞争。
+  max_concurrent_stage: 1
+  # 任务启动前要求的最小可用磁盘空间，单位为 GB。
+  minimum_free_disk_gb: 30
+
+tools:
+  # Chromium 可执行文件路径；留空时由 Playwright 自动管理浏览器。
+  chromium_path: ""
+  # ffmpeg 命令或完整可执行文件路径；需可被服务进程访问。
+  ffmpeg_path: "ffmpeg"
+  # ffprobe 命令或完整可执行文件路径；用于音视频测时和质检。
+  ffprobe_path: "ffprobe"
+
+agent:
+  # 是否向 agent 放开 bash / write / edit；默认放开（true）。
+  # 关闭后仅保留 read/grep/find/ls 等只读工具；安全性依赖审计留痕与系统提示约束。
+  allow_shell_write_edit: true
+
+workflow:
+  # 阶段失败后 agent 自救重试上限，范围 0-5；超限时该 run 置为 failed。
+  max_stage_retry: 2
+
+engines:
+  endpoints:
+    ark:
+      # 火山方舟 Agent Plan 基础地址；必须使用 /api/plan/v3，改为 /api/v3 会产生额外费用
+      base_url: "https://ark.cn-beijing.volces.com/api/plan/v3"
+      # 语言模型 ID；请替换为你的方舟账号可用的模型 ID（保留占位值 PLEASE_FILL_CHAT_MODEL_ID 时文案生成会被拒绝）
+      chat_model: "PLEASE_FILL_CHAT_MODEL_ID"
+      # 文生图模型 ID（doubao-seedream-5.0-pro）
+      image_model: "doubao-seedream-5-0-pro-260628"
+      # TTS 默认说话人；取值以火山控制台语音列表为准
+      tts_speaker: "zh_female_vv_uranus_bigtts"
+      # TTS 服务地址（openspeech，与 ark base_url 不同源）；Agent Plan 专用 /api/v3/plan/ 路径
+      tts_base_url: "https://openspeech.bytedance.com/api/v3/plan/tts/unidirectional"
+      # TTS 资源 ID，固定 seed-tts-2.0
+      tts_resource_id: "seed-tts-2.0"
+
+# prompts:
+#   # 默认提示词集（config/prompts/<名称>/ 目录，可复制 default 集后按需改文案/场景提示词）；
+#   # CLI --prompt-set 可临时覆盖；目录或文件缺失时回退内置默认提示词。
+#   default_set: "default"

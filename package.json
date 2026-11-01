@@ -1,0 +1,67 @@
+{
+  "name": "videoforge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "面向 Windows 本机的本地 AI 视频生成 harness：能力 → 项目 → run 的七阶段确定性流水线",
+  "license": "MIT",
+  "author": "swhite-cn",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/swhite-cn/vedio--generator.git"
+  },
+  "homepage": "https://github.com/swhite-cn/vedio--generator#readme",
+  "bugs": {
+    "url": "https://github.com/swhite-cn/vedio--generator/issues"
+  },
+  "keywords": [
+    "ai-video",
+    "video-generation",
+    "agent",
+    "pi-agent",
+    "fastify",
+    "vue",
+    "ffmpeg",
+    "playwright",
+    "harness"
+  ],
+  "engines": {
+    "node": ">=22.19.0",
+    "pnpm": ">=10"
+  },
+  "packageManager": "pnpm@10.0.0",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "esbuild"
+    ]
+  },
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:smoke": "set VF_SMOKE=1&& vitest run tests/integration/smoke-pipeline.test.ts",
+    "typecheck": "tsc -p apps/server/tsconfig.json --noEmit && tsc -p apps/cli/tsconfig.json --noEmit && tsc -p packages/pipeline/tsconfig.json --noEmit && tsc -p packages/renderer/tsconfig.json --noEmit && tsc -p packages/shared/tsconfig.json --noEmit && tsc -p packages/template-sdk/tsconfig.json --noEmit",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "doctor": "pnpm --filter @videoforge/cli start doctor",
+    "server:dev": "pnpm --filter @videoforge/server start",
+    "web:dev": "pnpm --filter @videoforge/web dev",
+    "web:build": "pnpm --filter @videoforge/web build"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "@vitejs/plugin-vue": "^6.0.1",
+    "@vitest/coverage-v8": "^5.0.2",
+    "@vue/test-utils": "^2.4.6",
+    "drizzle-orm": "^0.44.7",
+    "jsdom": "^26.1.0",
+    "prettier": "^3.9.10",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.2"
+  },
+  "dependencies": {
+    "yaml": "^2.9.1",
+    "zod": "^4.6.5"
+  }
+}
