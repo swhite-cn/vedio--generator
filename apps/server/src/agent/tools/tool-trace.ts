@@ -38,6 +38,8 @@ export interface ToolTraceOptions {
    * 缺省时退化为记录原始路径字符串（不改变「绝不记录正文」的裁剪规则）。
    */
   projectDir?: string;
+  /** 工具输出预览字符上限；缺省 `TOOL_OUTPUT_PREVIEW_CHARS`。 */
+  outputPreviewChars?: number;
 }
 
 /**
@@ -45,7 +47,7 @@ export interface ToolTraceOptions {
  * @param source 静态值或取值函数
  * @returns 解析后的 ID（缺失时为 null）
  */
-function resolveTraceId(source: TraceIdSource): string | null {
+export function resolveTraceId(source: TraceIdSource): string | null {
   const value = typeof source === "function" ? source() : source;
   return value ?? null;
 }
@@ -58,6 +60,47 @@ const BASH_TOOL_NAME = "bash";
 
 /** 需要裁剪正文的工具名（只保留路径类字段）。 */
 const PATH_ONLY_TOOL_NAMES = new Set(["write", "edit"]);
+
+/** 工具输出预览默认上限（字符数）；全文不落库，仅用于审计与对话流展示。 */
+export const TOOL_OUTPUT_PREVIEW_CHARS = 8192;
+
+/** 工具输出预览结果。 */
+export interface ToolOutputPreview {
+  /** 预览文本；无文本输出时为 null。 */
+  preview: string | null;
+  /** 是否因超限被截断。 */
+  truncated: boolean;
+}
+
+/**
+ * 把工具执行结果压缩为可展示的输出预览。
+ * 只取文本内容块（`content` 中的 `type: "text"`），按上限截断并标注。
+ * @param result 工具执行结果
+ * @param limit 预览字符上限
+ * @returns 预览文本与截断标记
+ */
+export function summarizeToolResult(
+  result: AgentToolResult<unknown> | undefined,
+  limit = TOOL_OUTPUT_PREVIEW_CHARS,
+): ToolOutputPreview {
+  if (!result) return { preview: null, truncated: false };
+  const content = result.content;
+  const parts: string[] = [];
+  if (typeof content === "string") {
+    parts.push(content);
+  } else if (Array.isArray(content)) {
+    for (const part of content) {
+      const candidate = part as { type?: unknown; text?: unknown };
+      if (candidate?.type === "text" && typeof candidate.text === "string") {
+        parts.push(candidate.text);
+      }
+    }
+  }
+  const text = parts.join("\n").trim();
+  if (text.length === 0) return { preview: null, truncated: false };
+  if (text.length <= limit) return { preview: text, truncated: false };
+  return { preview: text.slice(0, limit), truncated: true };
+}
 
 /**
  * 把绝对路径转成「相对项目目录、正斜杠」的展示路径（便于跨平台断言与展示）。
@@ -113,7 +156,7 @@ function buildTraceArgs(
 }
 
 /** 从工具的 `structuredContent` 中取 `exit_code`（`bash` 结构化输出字段）。 */
-function extractExitCode(result?: AgentToolResult<unknown>): number | undefined {
+export function extractExitCode(result?: AgentToolResult<unknown>): number | undefined {
   if (!result) return undefined;
   const structured = result.structuredContent as { exit_code?: unknown } | undefined;
   return typeof structured?.exit_code === "number" ? structured.exit_code : undefined;
@@ -156,6 +199,8 @@ function safeRecordToolCall(
     errorCode: string | null;
     durationMs: number;
     artifactPaths: string[];
+    outputPreview: string | null;
+    outputTruncated: boolean;
   },
 ): void {
   try {
@@ -170,6 +215,8 @@ function safeRecordToolCall(
       errorCode: input.errorCode,
       durationMs: input.durationMs,
       artifactPaths: input.artifactPaths,
+      outputPreview: input.outputPreview,
+      outputTruncated: input.outputTruncated,
     });
   } catch (error) {
     console.error(
@@ -210,11 +257,17 @@ export function withToolTrace<TParams extends TSchema, TDetails>(
           errorCode,
           durationMs: Date.now() - startedAt,
           artifactPaths: [],
+          outputPreview: error instanceof Error ? error.message : String(error),
+          outputTruncated: false,
         });
         throw error;
       }
 
       const ok = result.isError !== true;
+      const output = summarizeToolResult(
+        result as AgentToolResult<unknown>,
+        options.outputPreviewChars,
+      );
       safeRecordToolCall(trace, options, {
         tool: definition.name,
         args: buildTraceArgs(
@@ -229,6 +282,8 @@ export function withToolTrace<TParams extends TSchema, TDetails>(
           : (extractErrorCode(result as AgentToolResult<unknown>) ?? "TOOL_UNAVAILABLE"),
         durationMs: Date.now() - startedAt,
         artifactPaths: extractArtifactPaths(result as AgentToolResult<unknown>),
+        outputPreview: output.preview,
+        outputTruncated: output.truncated,
       });
       return result;
     },

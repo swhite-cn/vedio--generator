@@ -34,6 +34,10 @@ export interface TraceToolCall {
   error_code: string | null;
   duration_ms: number;
   artifact_paths: string[];
+  /** 输出预览（已按服务端上限截断）。 */
+  output_preview?: string | null;
+  /** 输出是否被截断。 */
+  output_truncated?: boolean;
   created_at: string;
 }
 
@@ -54,12 +58,23 @@ export interface TraceLlmCall {
   created_at: string;
 }
 
+/** 合成事件时间线条目（服务端 `buildRunEvents` 输出）。 */
+export interface TraceEventItem {
+  id: string;
+  type: string;
+  at: string;
+  stage: string | null;
+  title: string;
+  detail?: string;
+}
+
 /** trace 接口响应体（`GET /api/runs/:id/trace` 与 admin 版本形状一致）。 */
 interface TraceResponse {
   run: RunSummary;
   stages: TraceStage[];
   toolCalls: TraceToolCall[];
   llmCalls: TraceLlmCall[];
+  events?: TraceEventItem[];
   total: { toolCalls: number; llmCalls: number };
   paging: { limit: number; offset: number };
 }
@@ -76,6 +91,8 @@ export const useTraceStore = defineStore("trace", () => {
   const toolCalls = ref<TraceToolCall[]>([]);
   /** 当前页 LLM 调用切片。 */
   const llmCalls = ref<TraceLlmCall[]>([]);
+  /** 合成事件时间线（全量，不受分页影响）。 */
+  const events = ref<TraceEventItem[]>([]);
   /** 分片前总数。 */
   const total = ref({ toolCalls: 0, llmCalls: 0 });
   /** 当前分页（`{ limit, offset }`）。 */
@@ -88,28 +105,33 @@ export const useTraceStore = defineStore("trace", () => {
   /**
    * 加载 run trace。
    * @param runId run id
-   * @param options 分页与来源选项（`admin=true` 走 `GET /api/admin/runs/:id/trace`）
+   * @param options 分页、阶段过滤与来源选项（`admin=true` 走 `GET /api/admin/runs/:id/trace`）
    */
   async function load(
     runId: string,
-    options: { limit?: number; offset?: number; admin?: boolean } = {},
+    options: { limit?: number; offset?: number; admin?: boolean; stage?: string | null } = {},
   ): Promise<void> {
     const limit = options.limit ?? DEFAULT_TRACE_LIMIT;
     const offset = options.offset ?? 0;
     const base = options.admin
       ? `/api/admin/runs/${encodeURIComponent(runId)}/trace`
       : `/api/runs/${encodeURIComponent(runId)}/trace`;
+    const params = new URLSearchParams({
+      limit: String(limit),
+      offset: String(offset),
+    });
+    // 阶段过滤在服务端完成（total 同步收敛，避免前端只过滤当前页）
+    if (options.stage) params.set("stage", options.stage);
 
     loading.value = true;
     error.value = null;
     try {
-      const result = await apiRequest<TraceResponse>(
-        `${base}?limit=${encodeURIComponent(String(limit))}&offset=${encodeURIComponent(String(offset))}`,
-      );
+      const result = await apiRequest<TraceResponse>(`${base}?${params.toString()}`);
       run.value = result.run;
       stages.value = result.stages;
       toolCalls.value = result.toolCalls;
       llmCalls.value = result.llmCalls;
+      events.value = result.events ?? [];
       total.value = result.total;
       paging.value = result.paging;
       console.info(
@@ -129,10 +151,11 @@ export const useTraceStore = defineStore("trace", () => {
     stages.value = [];
     toolCalls.value = [];
     llmCalls.value = [];
+    events.value = [];
     total.value = { toolCalls: 0, llmCalls: 0 };
     paging.value = { limit: DEFAULT_TRACE_LIMIT, offset: 0 };
     error.value = null;
   }
 
-  return { run, stages, toolCalls, llmCalls, total, paging, loading, error, load, reset };
+  return { run, stages, toolCalls, llmCalls, events, total, paging, loading, error, load, reset };
 });

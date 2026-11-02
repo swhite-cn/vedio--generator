@@ -14,6 +14,7 @@ export const EVENT_BUFFER_SIZE = 200;
 /** 全部 SSE 事件类型（逐字照搬设计文档 §4.4，顺序即定义顺序）。 */
 export const SSE_EVENT_TYPES = [
   "text_delta",
+  "thinking_delta",
   "tool_start",
   "tool_end",
   "turn_end",
@@ -21,6 +22,7 @@ export const SSE_EVENT_TYPES = [
   "run_stage",
   "review_gate",
   "run_end",
+  "agent_action",
   "resync",
   "error",
 ] as const;

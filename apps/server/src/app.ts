@@ -1,4 +1,5 @@
 import Fastify, { type FastifyInstance } from "fastify";
+import multipart from "@fastify/multipart";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,12 +8,16 @@ import { loadSystemConfig } from "@videoforge/pipeline";
 import type { Actor, Message } from "@videoforge/shared";
 import { createDatabase, migrateDatabase } from "./db/index.js";
 import { getProject } from "./db/repositories/project-repository.js";
+import { getProjectAssetsByIds, listMessageAssetRefs } from "./db/repositories/asset-repository.js";
+import { getSession } from "./db/repositories/session-repository.js";
+import { buildAssetContext } from "./agent/asset-context.js";
 import { ensureAdminUser } from "./auth/bootstrap.js";
 import { registerJwt } from "./auth/jwt.js";
 import { loadJwtSecret } from "./auth/secret.js";
 import { createAgentRuntime } from "./agent/runtime.js";
 import type { AgentSessionRegistry } from "./agent/session-registry.js";
 import { createTraceStore, type TraceStore } from "./trace/trace-store.js";
+import { extractExitCode, summarizeToolResult } from "./agent/tools/tool-trace.js";
 import { createLoggerOptions } from "./trace/logger.js";
 import { createRedactor } from "./trace/redact.js";
 import {
@@ -114,6 +119,12 @@ function publishAgentSessionEvent(
 ): void {
   if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
     eventBus.publish(sessionId, "text_delta", { text: event.assistantMessageEvent.delta });
+  } else if (
+    event.type === "message_update" &&
+    event.assistantMessageEvent.type === "thinking_delta"
+  ) {
+    // 模型思考过程：与正文分开推送，前端渲染为可折叠块
+    eventBus.publish(sessionId, "thinking_delta", { text: event.assistantMessageEvent.delta });
   } else if (event.type === "tool_execution_start") {
     eventBus.publish(sessionId, "tool_start", {
       toolCallId: event.toolCallId,
@@ -123,10 +134,15 @@ function publishAgentSessionEvent(
       startedAt: new Date().toISOString(),
     });
   } else if (event.type === "tool_execution_end") {
+    const output = summarizeToolResult(event.result as never);
     eventBus.publish(sessionId, "tool_end", {
       toolCallId: event.toolCallId,
+      tool: event.toolName,
       ok: !event.isError,
       durationMs: event.durationMs,
+      exitCode: extractExitCode(event.result as never),
+      outputPreview: output.preview,
+      outputTruncated: output.truncated,
     });
   } else if (event.type === "turn_end") {
     eventBus.publish(sessionId, "turn_end", { message: event.message });
@@ -145,17 +161,28 @@ function publishAgentSessionEvent(
  * @param options 会话注册表
  * @returns ChatPort 实例
  */
-function createChatPort(options: { sessions: AgentSessionRegistry }): ChatPort {
-  const { sessions } = options;
+function createChatPort(options: { db: any; sessions: AgentSessionRegistry }): ChatPort {
+  const { db, sessions } = options;
   return {
     /** 下发一条用户消息并等待本轮结束。 */
     async send(actor: Actor, sessionId: string, message: Message): Promise<void> {
       const entry = await sessions.getOrCreate(actor, sessionId);
       try {
         const text = extractUserText(message.payload);
+        const session = getSession(db, actor, sessionId);
+        const refs = listMessageAssetRefs(db, actor, [message.id]).get(message.id) ?? [];
+        const assets = session
+          ? getProjectAssetsByIds(
+              db,
+              actor,
+              session.project_id,
+              refs.sort((left, right) => left.ordinal - right.ordinal).map((ref) => ref.asset_id),
+            )
+          : [];
+        const prompt = [buildAssetContext(assets), "## 用户请求", text].filter(Boolean).join("\n\n");
         // 流式期调用 prompt 必须显式指定 streamingBehavior，否则 Pi 会拒绝该调用
         await entry.session.prompt(
-          text,
+          prompt,
           entry.session.isStreaming ? { streamingBehavior: "followUp" } : undefined,
         );
       } finally {
@@ -320,6 +347,10 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
 
   // 先注册 JWT 插件（鉴权钩子与 SSE 票据依赖 app.jwt）
   await registerJwt(app, options.deps.config, options.jwtSecret);
+  // 上传解析器：限制单文件大小与数量，资产路由再做类型、路径与项目容量校验。
+  await app.register(multipart, {
+    limits: { files: 1, fileSize: options.deps.config.assets.max_upload_bytes },
+  });
 
   // 健康检查：集成测试与冷启动探活依赖该端点
   app.get("/health", async () => ({ status: "ok", service: "videoforge-server" }));
@@ -431,7 +462,7 @@ export async function startServer(
     });
 
     // 13) 对话端口
-    const chat = createChatPort({ sessions: runtime.sessions });
+    const chat = createChatPort({ db, sessions: runtime.sessions });
 
     // 14) HTTP 层依赖
     const deps: HttpDeps = {

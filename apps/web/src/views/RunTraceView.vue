@@ -44,23 +44,8 @@ const forbidden = computed(
 );
 
 /**
- * 各阶段的全部阶段实例 id（同一阶段可能有多次重试行，见主文档 §11 `run_stages`）。
- * 右侧明细按「阶段」过滤而非按单次尝试，故需保留全部实例 id。
- */
-const stageInstanceIds = computed(() => {
-  const map = new Map<string, string[]>();
-  for (const row of trace.stages) {
-    const list = map.get(row.stage);
-    if (list) list.push(row.id);
-    else map.set(row.stage, [row.id]);
-  }
-  return map;
-});
-
-/**
  * 阶段步骤行：复用 `toStageProgress` 按七阶段折叠（重试行只保留最新一次尝试，
  * 缺失阶段补 `pending`），保证步骤条恒为 1..7（Web 专题 §5.5「`Steps` 竖排七阶段」）。
- * `id` 取阶段名作为选中键，`stageIds` 供右侧明细过滤该阶段的全部尝试。
  */
 const stageRows = computed(() =>
   toStageProgress(trace.stages).map((row) => ({
@@ -72,30 +57,26 @@ const stageRows = computed(() =>
     attempt: row.attempt,
     errorCode: row.error_code,
     elapsed: formatElapsed(row.started_at, row.ended_at),
-    stageIds: stageInstanceIds.value.get(row.stage) ?? [],
   })),
 );
 
-/** 当前选中阶段的全部阶段实例 id（未选中时不参与过滤）。 */
-const selectedStageIds = computed(
-  () => stageRows.value.find((row) => row.id === selectedStageId.value)?.stageIds ?? [],
-);
+/** 当前页工具调用（服务端已按选中阶段过滤）。 */
+const toolRows = computed(() => trace.toolCalls);
+/** 当前页 LLM 调用（服务端已按选中阶段过滤）。 */
+const llmRows = computed(() => trace.llmCalls);
 
-/** 当前页内按选中阶段（含其全部重试尝试）过滤的工具调用。 */
-const toolRows = computed(() =>
-  trace.toolCalls.filter(
-    (item) => !selectedStageId.value || selectedStageIds.value.includes(item.stage_id ?? ""),
-  ),
-);
-/** 当前页内按选中阶段（含其全部重试尝试）过滤的 LLM 调用。 */
-const llmRows = computed(() =>
-  trace.llmCalls.filter(
-    (item) => !selectedStageId.value || selectedStageIds.value.includes(item.stage_id ?? ""),
+/**
+ * 事件时间线：选中阶段时保留该阶段事件与 run 级事件（`stage` 为空）。
+ */
+const eventRows = computed(() =>
+  trace.events.filter(
+    (item) => !selectedStageId.value || !item.stage || item.stage === selectedStageId.value,
   ),
 );
 
 /** 工具调用表列定义。 */
 const toolColumns = [
+  { title: "阶段", key: "stage", width: 90 },
   { title: "工具", dataIndex: "tool", key: "tool" },
   { title: "状态", dataIndex: "ok", key: "ok", width: 90 },
   { title: "耗时", dataIndex: "duration_ms", key: "duration_ms", width: 90 },
@@ -104,12 +85,29 @@ const toolColumns = [
 
 /** LLM 调用表列定义。 */
 const llmColumns = [
+  { title: "阶段", key: "stage", width: 90 },
   { title: "模型", dataIndex: "model", key: "model" },
   { title: "prompt", dataIndex: "prompt_tokens", key: "prompt_tokens", width: 90 },
   { title: "completion", dataIndex: "completion_tokens", key: "completion_tokens", width: 100 },
   { title: "耗时", dataIndex: "duration_ms", key: "duration_ms", width: 90 },
   { title: "状态", dataIndex: "ok", key: "ok", width: 80 },
 ];
+
+/** 阶段实例 id → 阶段名（表格「阶段」列展示）。 */
+const stageNameById = computed(
+  () => new Map(trace.stages.map((row) => [row.id, row.stage] as const)),
+);
+
+/**
+ * 取留痕行所属阶段的中文名。
+ * @param stageId 阶段实例 id（可能缺失）
+ * @returns 阶段中文名；无法解析时为 `-`
+ */
+function stageLabelOf(stageId?: string): string {
+  if (!stageId) return "-";
+  const stage = stageNameById.value.get(stageId);
+  return stage ? (STAGE_LABELS[stage] ?? stage) : "-";
+}
 
 /** 返回链接目标（admin 源回 `/admin`，否则回该 run 所属项目工作台）。 */
 const backTarget = computed(() => {
@@ -167,13 +165,18 @@ async function copyText(text: string): Promise<void> {
 }
 
 /**
- * 加载 trace 数据。
+ * 加载 trace 数据（阶段过滤交给服务端，分页与过滤一致）。
  * @param offset 偏移量（默认 0）
  * @param limit 每页条数（默认当前分页）
  */
 async function load(offset = 0, limit = trace.paging.limit): Promise<void> {
   try {
-    await trace.load(runId.value, { limit, offset, admin: isAdminSource.value });
+    await trace.load(runId.value, {
+      limit,
+      offset,
+      admin: isAdminSource.value,
+      stage: selectedStageId.value || null,
+    });
   } catch (error) {
     console.warn("[web] trace 加载失败", error);
   }
@@ -190,11 +193,34 @@ function onTableChange(pagination: { current?: number; pageSize?: number }): voi
 }
 
 /**
- * 选中某阶段。
+ * 选中某阶段：同步地址栏 `?stage=`（刷新 / 从工作台锚链进入时保持选中），并重拉该阶段留痕。
  * @param id 阶段选中键（阶段名，见 `stageRows`）
  */
 function selectStage(id: string): void {
+  if (selectedStageId.value === id) return;
   selectedStageId.value = id;
+  void router.replace({ path: route.path, query: { ...route.query, stage: id } });
+  void load(0, trace.paging.limit);
+}
+
+/**
+ * 清除阶段过滤，查看整条 run 的全部留痕。
+ */
+function clearStage(): void {
+  selectedStageId.value = "";
+  const query = { ...route.query };
+  delete query.stage;
+  void router.replace({ path: route.path, query });
+  void load(0, trace.paging.limit);
+}
+
+/**
+ * 从地址栏读取预选阶段（工作台工具卡片的「查看 trace」锚链会带 `?stage=`）。
+ * @returns 阶段名；缺省为空串（由首个已执行阶段兜底）
+ */
+function stageFromQuery(): string {
+  const value = route.query.stage;
+  return typeof value === "string" ? value : "";
 }
 
 /**
@@ -214,6 +240,7 @@ onMounted(async () => {
   mediaQuery = window.matchMedia("(max-width: 899.98px)");
   handleMediaChange(mediaQuery);
   mediaQuery.addEventListener("change", handleMediaChange);
+  selectedStageId.value = stageFromQuery();
   await load();
 });
 
@@ -223,12 +250,23 @@ onUnmounted(() => {
   trace.reset();
 });
 
-// 切换 run 时重置选中与分页后重拉
+// 切换 run 时重置选中与分页后重拉（保留地址栏指定阶段）
 watch(runId, () => {
   trace.reset();
-  selectedStageId.value = "";
+  selectedStageId.value = stageFromQuery();
   void load(0, DEFAULT_TRACE_LIMIT);
 });
+
+// 地址栏 `?stage=` 变化（如从工作台另一张工具卡片进入）时同步选中并重拉
+watch(
+  () => route.query.stage,
+  (value) => {
+    const next = typeof value === "string" ? value : "";
+    if (next === selectedStageId.value) return;
+    selectedStageId.value = next;
+    void load(0, trace.paging.limit);
+  },
+);
 
 // 阶段数据到达后默认选中首个已执行阶段（`stageRows` 恒为七阶段，故取首个非 pending）
 watch(
@@ -236,7 +274,9 @@ watch(
   () => {
     if (selectedStageId.value) return;
     const first = stageRows.value.find((row) => row.status !== "pending") ?? stageRows.value[0];
-    selectedStageId.value = first?.id ?? "";
+    if (!first) return;
+    selectedStageId.value = first.id;
+    void load(0, trace.paging.limit);
   },
 );
 </script>
@@ -307,6 +347,15 @@ watch(
 
       <!-- 右：选中阶段明细 -->
       <section class="trace-detail">
+        <div class="trace-scope">
+          <span v-if="selectedStageId">
+            当前阶段：{{ STAGE_LABELS[selectedStageId] ?? selectedStageId }}
+          </span>
+          <span v-else>当前展示：全部留痕</span>
+          <a-button v-if="selectedStageId" type="link" size="small" @click="clearStage">
+            查看全部留痕
+          </a-button>
+        </div>
         <a-tabs v-model:activeKey="detailTab">
           <!-- 工具调用 -->
           <a-tab-pane key="tools" tab="工具调用">
@@ -320,7 +369,12 @@ watch(
               @change="(pagination) => onTableChange(pagination)"
             >
               <template #bodyCell="{ column, record }">
-                <template v-if="column.key === 'tool'">{{ toolDisplayName(record.tool) }}</template>
+                <template v-if="column.key === 'stage'">{{
+                  stageLabelOf(record.stage_id)
+                }}</template>
+                <template v-else-if="column.key === 'tool'">{{
+                  toolDisplayName(record.tool)
+                }}</template>
                 <template v-else-if="column.key === 'ok'">
                   <a-tag :color="record.ok ? 'success' : 'error'">{{
                     record.ok ? "成功" : "失败"
@@ -345,6 +399,22 @@ watch(
                   <p v-if="presentJson(record.args_json).truncated" class="trace-truncated">
                     内容超过 50KB 已截断；完整内容本期请用 SQL 查询。
                   </p>
+
+                  <!-- 输出预览：内置工具 stdout / 文件片段（服务端已截断） -->
+                  <template v-if="record.output_preview">
+                    <div class="trace-json-head">
+                      <span>
+                        输出
+                        <span v-if="record.output_truncated" class="trace-truncated"
+                          >（已截断）</span
+                        >
+                      </span>
+                      <a-button size="small" @click="copyText(String(record.output_preview))"
+                        >复制</a-button
+                      >
+                    </div>
+                    <pre class="trace-code">{{ record.output_preview }}</pre>
+                  </template>
                 </div>
               </template>
             </a-table>
@@ -362,7 +432,10 @@ watch(
               @change="(pagination) => onTableChange(pagination)"
             >
               <template #bodyCell="{ column, record }">
-                <template v-if="column.key === 'ok'">
+                <template v-if="column.key === 'stage'">{{
+                  stageLabelOf(record.stage_id)
+                }}</template>
+                <template v-else-if="column.key === 'ok'">
                   <a-tag :color="record.ok ? 'success' : 'error'">{{
                     record.ok ? "成功" : "失败"
                   }}</a-tag>
@@ -408,9 +481,25 @@ watch(
             </a-table>
           </a-tab-pane>
 
-          <!-- 事件（服务端当前未提供留痕查询接口，仅 SSE 实时流） -->
-          <a-tab-pane key="events" tab="事件">
-            <a-empty description="事件时间线留痕查询接口本期未提供，当前仅支持 SSE 实时事件流" />
+          <!-- 事件：由 run / 阶段 / 工具 / LLM 留痕合成的时间线（不是原始 SSE 流） -->
+          <a-tab-pane key="events" :tab="`事件（${eventRows.length}）`">
+            <ul v-if="eventRows.length > 0" class="trace-events">
+              <li
+                v-for="item in eventRows"
+                :key="item.id"
+                class="trace-event"
+                :class="`is-${item.type}`"
+              >
+                <span class="trace-event-time">{{ formatDateTime(item.at) }}</span>
+                <span class="trace-event-dot" aria-hidden="true" />
+                <span class="trace-event-title">{{ item.title }}</span>
+                <a-tag v-if="item.stage" class="trace-event-stage">
+                  {{ STAGE_LABELS[item.stage] ?? item.stage }}
+                </a-tag>
+                <span v-if="item.detail" class="trace-event-detail">{{ item.detail }}</span>
+              </li>
+            </ul>
+            <a-empty v-else description="暂无留痕事件" />
           </a-tab-pane>
         </a-tabs>
       </section>
@@ -434,11 +523,20 @@ watch(
 
 .trace-back {
   padding: 4px 8px;
-  border: 1px solid #d9d9d9;
-  border-radius: 6px;
-  background: #fff;
-  color: rgb(0 0 0 / 75%);
+  border: 1px solid var(--vf-border-strong);
+  border-radius: var(--vf-radius-sm);
+  background: var(--vf-surface);
+  color: var(--vf-text-secondary);
   cursor: pointer;
+}
+
+.trace-scope {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+  color: var(--vf-text-tertiary);
+  font-size: 12px;
 }
 
 .trace-title {
@@ -465,9 +563,77 @@ watch(
 .trace-stages,
 .trace-detail {
   padding: 16px;
-  border: 1px solid #f0f0f0;
-  border-radius: 8px;
-  background: #fff;
+  border: 1px solid var(--vf-border);
+  border-radius: var(--vf-radius);
+  background: var(--vf-surface);
+}
+
+/* 事件时间线：时间 + 状态点 + 标题 + 阶段标签 + 细节 */
+.trace-events {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.trace-event {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 4px;
+  border-bottom: 1px dashed var(--vf-border);
+  font-size: 13px;
+}
+
+.trace-event:last-child {
+  border-bottom: 0;
+}
+
+.trace-event-time {
+  flex: none;
+  color: var(--vf-text-tertiary);
+  font-family: var(--vf-font-mono);
+  font-size: 12px;
+}
+
+.trace-event-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--vf-text-tertiary);
+}
+
+.trace-event.is-stage_failed .trace-event-dot,
+.trace-event.is-run_failed .trace-event-dot {
+  background: var(--vf-danger);
+}
+
+.trace-event.is-stage_done .trace-event-dot,
+.trace-event.is-run_done .trace-event-dot {
+  background: var(--vf-success);
+}
+
+.trace-event.is-stage_started .trace-event-dot,
+.trace-event.is-run_started .trace-event-dot {
+  background: var(--vf-primary);
+}
+
+.trace-event.is-stage_skipped .trace-event-dot {
+  background: var(--vf-warning);
+}
+
+.trace-event-title {
+  color: var(--vf-text);
+}
+
+.trace-event-stage {
+  margin-inline-end: 0;
+}
+
+.trace-event-detail {
+  color: var(--vf-text-tertiary);
+  font-size: 12px;
 }
 
 .trace-stage-title {

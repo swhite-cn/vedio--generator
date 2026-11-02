@@ -72,6 +72,88 @@ export interface Message {
   created_at: string;
 }
 
+/** 项目资产来源集合。 */
+export const PROJECT_ASSET_SOURCES = ["generated", "uploaded"] as const;
+/** 项目资产来源。 */
+export type ProjectAssetSource = (typeof PROJECT_ASSET_SOURCES)[number];
+
+/** 项目资产类型集合。 */
+export const PROJECT_ASSET_KINDS = [
+  "document",
+  "image",
+  "audio",
+  "copy",
+  "scene",
+  "timeline",
+  "video",
+  "frames",
+] as const;
+/** 项目资产类型。 */
+export type ProjectAssetKind = (typeof PROJECT_ASSET_KINDS)[number];
+
+/** 项目资产（用户上传或流水线生成）。 */
+export interface ProjectAsset {
+  id: string;
+  project_id: string;
+  source: ProjectAssetSource;
+  kind: ProjectAssetKind;
+  label: string;
+  relative_path: string;
+  mime_type: string;
+  size_bytes: number;
+  run_id: string | null;
+  stage: PipelineStage | null;
+  supersedes_asset_id: string | null;
+  metadata_json: unknown;
+  created_at: string;
+}
+
+/** 一条消息和一个项目资产之间的引用。 */
+export interface MessageAssetRef {
+  id: string;
+  message_id: string;
+  asset_id: string;
+  ordinal: number;
+  created_at: string;
+}
+
+/** Agent 动作类型。 */
+export const AGENT_ACTION_KINDS = [
+  "analyze",
+  "reversible_edit",
+  "regenerate",
+  "render",
+  "compose",
+] as const;
+/** Agent 动作类型。 */
+export type AgentActionKind = (typeof AGENT_ACTION_KINDS)[number];
+
+/** Agent 动作状态。 */
+export const AGENT_ACTION_STATUSES = [
+  "executing",
+  "waiting_confirmation",
+  "done",
+  "failed",
+  "canceled",
+] as const;
+/** Agent 动作状态。 */
+export type AgentActionStatus = (typeof AGENT_ACTION_STATUSES)[number];
+
+/** Agent 对用户素材请求产生的结构化动作记录。 */
+export interface AgentAction {
+  id: string;
+  project_id: string;
+  session_id: string;
+  message_id: string;
+  kind: AgentActionKind;
+  status: AgentActionStatus;
+  plan_json: unknown;
+  run_id: string | null;
+  error_code: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 /** 运行状态集合，见设计文档 §11 `runs.status` 与 §6.2 状态机。 */
 export const RUN_STATUSES = [
   "queued",
@@ -159,6 +241,10 @@ export interface ToolCall {
   duration_ms: number;
   /** 产出工件路径列表，存 JSON 文本。 */
   artifact_paths: string[];
+  /** 工具输出预览（截断后的纯文本；全文不落库，见设计文档 §7.3）。 */
+  output_preview?: string | null;
+  /** 输出是否被截断。 */
+  output_truncated?: boolean;
   created_at: string;
 }
 

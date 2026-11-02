@@ -89,8 +89,13 @@ export function listRunStages(db: any, actor: Actor, runId: string): RunStage[] 
     .where(eq(runStages.runId, runId))
     .all()
     .map(toRunStage) as RunStage[];
-  // run_stages 无顺序列：按 PIPELINE_STAGES 声明的阶段顺序排序
-  return rows.sort((a, b) => PIPELINE_STAGES.indexOf(a.stage) - PIPELINE_STAGES.indexOf(b.stage));
+  // run_stages 无顺序列：先按 PIPELINE_STAGES 声明的阶段顺序，再按 attempt 升序；
+  // 前端按「同阶段后者覆盖前者」聚合，必须保证最后一条是最大 attempt（最新一次尝试）。
+  return rows.sort(
+    (a, b) =>
+      PIPELINE_STAGES.indexOf(a.stage) - PIPELINE_STAGES.indexOf(b.stage) ||
+      a.attempt - b.attempt,
+  );
 }
 
 /**

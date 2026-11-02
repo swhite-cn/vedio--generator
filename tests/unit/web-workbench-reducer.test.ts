@@ -336,8 +336,90 @@ describe("error 与未知事件", () => {
     expect(state.lastError).toEqual({ code: "UNKNOWN", message: "未知错误" });
   });
 
+  test("error 同时在对话流追加可见错误条", () => {
+    const state = applyEvent(
+      createInitialState(),
+      frame("error", { code: "ADAPTER_FAILED", message: "模型调用失败" }),
+    );
+    expect(lastMessage(state)).toMatchObject({ kind: "error" });
+    expect(lastMessage(state).text).toContain("模型调用失败");
+  });
+
   test("未识别事件原样返回同一状态", () => {
     const initial = createInitialState();
     expect(applyEvent(initial, frame("totally_unknown", { x: 1 }))).toBe(initial);
+  });
+});
+
+describe("thinking_delta（思考过程）", () => {
+  test("首帧新建流式思考块", () => {
+    const state = applyEvent(createInitialState(), frame("thinking_delta", { text: "先分析主题" }));
+    expect(lastMessage(state)).toMatchObject({
+      kind: "thinking",
+      text: "先分析主题",
+      streaming: true,
+    });
+    expect(state.agentStreaming).toBe(true);
+  });
+
+  test("连续增量追加到同一思考块", () => {
+    let state = applyEvent(createInitialState(), frame("thinking_delta", { text: "先" }));
+    state = applyEvent(state, frame("thinking_delta", { text: "分析" }));
+    expect(state.messages).toHaveLength(1);
+    expect(lastMessage(state).text).toBe("先分析");
+  });
+
+  test("正文开始（text_delta）时思考块定稿并另起 assistant 气泡", () => {
+    let state = applyEvent(createInitialState(), frame("thinking_delta", { text: "思考" }));
+    state = applyEvent(state, frame("text_delta", { text: "正文" }));
+    expect(state.messages).toHaveLength(2);
+    expect(state.messages[0]).toMatchObject({ kind: "thinking", streaming: false });
+    expect(lastMessage(state)).toMatchObject({ kind: "assistant", text: "正文", streaming: true });
+  });
+
+  test("turn_end 同时定稿思考块", () => {
+    let state = applyEvent(createInitialState(), frame("thinking_delta", { text: "思考" }));
+    state = applyEvent(state, frame("turn_end", {}));
+    expect(lastMessage(state)).toMatchObject({ kind: "thinking", streaming: false });
+  });
+});
+
+describe("工具输出与退出码", () => {
+  test("tool_end 写入输出预览、截断标记与退出码", () => {
+    let state = applyEvent(
+      createInitialState(),
+      frame("tool_start", { toolCallId: "t1", tool: "bash" }),
+    );
+    state = applyEvent(
+      state,
+      frame("tool_end", {
+        toolCallId: "t1",
+        ok: true,
+        outputPreview: "hello",
+        outputTruncated: true,
+        exitCode: 0,
+      }),
+    );
+    expect(lastMessage(state).tool).toMatchObject({
+      outputPreview: "hello",
+      outputTruncated: true,
+      exitCode: 0,
+    });
+  });
+});
+
+describe("run_stage 阶段分隔条", () => {
+  test("阶段切换进入 running 时插入分隔条", () => {
+    let state = applyEvent(createInitialState(), frame("run_start", { runId: "r1" }));
+    state = applyEvent(state, frame("run_stage", { stage: "copy", status: "running", attempt: 1 }));
+    expect(lastMessage(state)).toMatchObject({ kind: "stageDivider", text: "copy" });
+  });
+
+  test("同一阶段重复上报 running 时不重复插入分隔条", () => {
+    let state = applyEvent(createInitialState(), frame("run_start", { runId: "r1" }));
+    state = applyEvent(state, frame("run_stage", { stage: "copy", status: "running", attempt: 1 }));
+    const count = state.messages.length;
+    state = applyEvent(state, frame("run_stage", { stage: "copy", status: "running", attempt: 1 }));
+    expect(state.messages.length).toBe(count);
   });
 });

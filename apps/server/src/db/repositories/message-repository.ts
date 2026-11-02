@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { asc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, lt } from "drizzle-orm";
 import type { Actor, Message, MessageRole } from "@videoforge/shared";
 import { VideoForgeError } from "@videoforge/shared";
 import { messages } from "../schema.js";
@@ -66,4 +66,63 @@ export function listMessages(db: any, actor: Actor, sessionId: string): Message[
     .orderBy(asc(messages.createdAt))
     .all()
     .map(toMessage);
+}
+
+/** 消息游标分页参数。 */
+export interface MessagePageOptions {
+  /** 每页条数（缺省 50，上限 200）。 */
+  limit?: number;
+  /** 游标：只取该时间之前的消息（`created_at` ISO 字符串）。 */
+  before?: string;
+}
+
+/** 消息游标分页结果。 */
+export interface MessagePage {
+  /** 按 `created_at` 升序的消息列表。 */
+  messages: Message[];
+  /** 是否还有更早的消息。 */
+  hasMore: boolean;
+  /** 下一页游标（`hasMore` 为 true 时等于最旧一条的 `created_at`）。 */
+  nextBefore: string | null;
+}
+
+/**
+ * 按会话游标分页列出消息（用于聊天历史回放）。
+ * 查询按时间倒序取 `limit` 条后反转为升序，`nextBefore` 指向本页最旧一条。
+ * @param db Drizzle 数据库实例
+ * @param actor 请求主体
+ * @param sessionId 会话 ID
+ * @param options 分页参数
+ * @returns 分页结果；会话不属于 actor 时返回空页
+ */
+export function listMessagesPage(
+  db: any,
+  actor: Actor,
+  sessionId: string,
+  options: MessagePageOptions = {},
+): MessagePage {
+  if (!getSession(db, actor, sessionId)) {
+    return { messages: [], hasMore: false, nextBefore: null };
+  }
+  const limit = Math.min(Math.max(options.limit ?? 50, 1), 200);
+  const conditions = [eq(messages.sessionId, sessionId)];
+  if (options.before) conditions.push(lt(messages.createdAt, options.before));
+
+  const rows = db
+    .select()
+    .from(messages)
+    .where(and(...conditions))
+    .orderBy(desc(messages.createdAt))
+    .limit(limit + 1)
+    .all()
+    .map(toMessage) as Message[];
+
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+  const ascending = page.reverse();
+  return {
+    messages: ascending,
+    hasMore,
+    nextBefore: hasMore && ascending.length > 0 ? ascending[0].created_at : null,
+  };
 }

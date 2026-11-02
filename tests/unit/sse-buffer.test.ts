@@ -63,9 +63,10 @@ describe("createEventBus: 事件构造与 id 分配", () => {
     expect(event.at).toBe(new Date(fixed).toISOString());
   });
 
-  test("SSE_EVENT_TYPES 覆盖 §4.4 十种事件类型", () => {
+  test("SSE_EVENT_TYPES 覆盖 §4.4 事件类型（含思考增量）", () => {
     expect(SSE_EVENT_TYPES).toEqual([
       "text_delta",
+      "thinking_delta",
       "tool_start",
       "tool_end",
       "turn_end",
@@ -73,6 +74,8 @@ describe("createEventBus: 事件构造与 id 分配", () => {
       "run_stage",
       "review_gate",
       "run_end",
+      // Agent 动作确认/取消事件（工作台确认卡）
+      "agent_action",
       "resync",
       "error",
     ]);

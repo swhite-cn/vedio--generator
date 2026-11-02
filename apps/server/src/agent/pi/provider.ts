@@ -235,6 +235,16 @@ function replayResult(args: RunStreamArgs, result: ArkChatResult, startedAt: num
   );
   stream.push({ type: "start", partial });
 
+  // 思考过程（模型支持时）：先于正文回放，供上层转发为 thinking_delta 并持久化
+  if (result.reasoning) {
+    const contentIndex = partial.content.length;
+    partial.content.push({ type: "thinking", thinking: "" });
+    stream.push({ type: "thinking_start", contentIndex, partial });
+    partial.content[contentIndex] = { type: "thinking", thinking: result.reasoning };
+    stream.push({ type: "thinking_delta", contentIndex, delta: result.reasoning, partial });
+    stream.push({ type: "thinking_end", contentIndex, content: result.reasoning, partial });
+  }
+
   if (result.content) {
     const contentIndex = partial.content.length;
     partial.content.push({ type: "text", text: "" });

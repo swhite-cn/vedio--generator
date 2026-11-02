@@ -185,6 +185,8 @@ interface EngineContext {
   onStageChange: (record: StageChangeRecord) => void;
   timestamp: () => string;
   semaphore: Semaphore;
+  /** 已取消 run 的集合：在途阶段据此提前退出，避免取消后把 run 覆盖为 failed。 */
+  canceled: Set<string>;
 }
 
 /** 单个阶段的执行结论：`done` 携带产物路径；`failed` 携带最后一次错误码。 */
@@ -311,6 +313,10 @@ async function executeStageWithRetry(
     const baseAttempt = pendingRow ? pendingRow.attempt : 0;
 
     for (let attempt = baseAttempt; attempt <= baseAttempt + ctx.maxRetry; attempt += 1) {
+      // 取消后不再发起新的尝试（在途阶段由外层中止，见 `cancelWorkflow`）
+      if (ctx.canceled.has(run.id)) {
+        return { status: "failed", errorCode: "INTERRUPTED" };
+      }
       let row = findRunStageByAttempt(ctx.db, actor, run.id, declaration.stage, attempt);
       if (!row) {
         // attempt > 0（或首次也无行）→ 新建阶段行，attempt 递增（done 无出边，故重跑必新建行）
@@ -388,6 +394,11 @@ async function executeStageWithRetry(
       const satisfied =
         result.ok && verifyStageArtifact(projectDir, declaration.artifact, project.profile);
       const artifactPaths = result.artifactPaths ?? [];
+
+      // 取消优先：run 已被取消时不再写阶段结论，交由外层直接返回 canceled run
+      if (ctx.canceled.has(run.id)) {
+        return { status: "failed", errorCode: "INTERRUPTED" };
+      }
       if (satisfied) {
         assertStageTransition("running", "done");
         const endedAt = ctx.timestamp();
@@ -491,6 +502,11 @@ async function advance(
       projectDir,
       context.feedback,
     );
+
+    // 取消优先：在途阶段结束后不要覆盖 canceled 状态
+    if (ctx.canceled.has(run.id)) {
+      return getRunOrThrow(ctx, actor, run.id);
+    }
 
     if (outcome.status === "failed") {
       updateRunStatus(ctx.db, actor, run.id, {
@@ -664,6 +680,8 @@ async function resumeWorkflow(
 function cancelWorkflow(ctx: EngineContext, actor: Actor, runId: string): Run {
   const run = getRunOrThrow(ctx, actor, runId);
   assertRunTransition(run.status, "canceled");
+  // 先登记再改状态：在途阶段据此提前退出（协作式取消）
+  ctx.canceled.add(runId);
   updateRunStatus(ctx.db, actor, runId, { status: "canceled", endedAt: ctx.timestamp() });
   emitEvent(ctx, run, "run_canceled");
   return getRunOrThrow(ctx, actor, runId);
@@ -684,6 +702,7 @@ export function createWorkflowEngine(options: WorkflowEngineOptions): WorkflowEn
     onStageChange: options.onStageChange ?? (() => {}),
     timestamp: () => new Date((options.now ?? Date.now)()).toISOString(),
     semaphore: createSemaphore(options.config.runtime.max_concurrent_stage),
+    canceled: new Set(),
   };
 
   return {

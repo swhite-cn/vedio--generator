@@ -126,7 +126,7 @@ describe("数据库 schema 重建", () => {
     expect(() => migrateDatabase(filename)).not.toThrow();
   });
 
-  test("旧 projects 同名替换：旧数据不沿用，新结构生效", () => {
+  test("旧 projects（无 user_id）一次性替换：旧数据不沿用，新结构生效", () => {
     // 先造出旧 Build 领域的 projects 表并写入一行
     const legacy = createDatabase(filename);
     legacy.sqlite.exec(
@@ -147,6 +147,30 @@ describe("数据库 schema 重建", () => {
         c: number;
       };
       expect(count.c).toBe(0);
+    } finally {
+      database.sqlite.close();
+    }
+  });
+
+  test("再次迁移不删除已有项目数据", () => {
+    migrateDatabase(filename);
+    const seeded = createDatabase(filename);
+    seeded.sqlite.exec(
+      "INSERT INTO users (id, username, password_hash, display_name, created_at) VALUES ('u1', 'alice', 'h', 'Alice', '2026-01-01')",
+    );
+    seeded.sqlite.exec(
+      "INSERT INTO projects (id, user_id, capability_id, name, topic, profile, status, created_at, updated_at) VALUES ('p1', 'u1', 'cap', '项目一', '主题', 'default', 'draft', '2026-01-01', '2026-01-01')",
+    );
+    seeded.sqlite.close();
+
+    migrateDatabase(filename);
+
+    const database = createDatabase(filename);
+    try {
+      const count = database.sqlite.prepare("SELECT COUNT(*) AS c FROM projects").get() as {
+        c: number;
+      };
+      expect(count.c).toBe(1);
     } finally {
       database.sqlite.close();
     }

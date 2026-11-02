@@ -1,4 +1,4 @@
-import { isAbsolute, relative, resolve } from "node:path";
+import { basename, isAbsolute, relative, resolve } from "node:path";
 import { VideoForgeError } from "@videoforge/shared";
 
 /** 项目名长度上限（见设计文档 §8.3：1..64）。 */
@@ -8,7 +8,36 @@ const PROJECT_NAME_MAX_LENGTH = 64;
 const ILLEGAL_PROJECT_NAME_CHARS = new Set(["/", "\\", ":", "*", "?", '"', "<", ">", "|"]);
 
 /**
+ * Windows 保留设备名（不区分大小写）。
+ *
+ * 这些名字即使带扩展名也会被系统解释为设备，无法当作普通文件读写；一旦由命令或工具
+ * 误创建（典型来源是 cmd 风格的 `2>nul` 重定向），还会连带破坏 grep / find 等遍历型工具。
+ * 见 https://learn.microsoft.com/windows/win32/fileio/naming-a-file
+ */
+const WINDOWS_RESERVED_BASE_NAMES = new Set([
+  "con",
+  "prn",
+  "aux",
+  "nul",
+  ...Array.from({ length: 9 }, (_, index) => `com${index + 1}`),
+  ...Array.from({ length: 9 }, (_, index) => `lpt${index + 1}`),
+]);
+
+/**
+ * 判断名称是否为 Windows 保留设备名（见设计文档 §8.3 文件层）。
+ * 判定口径与 Windows 一致：取首个点号之前的主名、去首尾空白、不区分大小写，
+ * 因此 `nul`、`NUL.txt`、`nul ` 都判为保留名。
+ * @param name 文件或目录名（不含路径分隔符）
+ * @returns 是保留设备名返回 true
+ */
+export function isWindowsReservedName(name: string): boolean {
+  const baseName = name.split(".")[0]?.trim().toLowerCase() ?? "";
+  return WINDOWS_RESERVED_BASE_NAMES.has(baseName);
+}
+
+/**
  * 将工件相对路径解析到存储根目录，并拒绝目录逃逸。
+ * 同时拒绝 Windows 保留设备名（如 `nul`）作为工件名——这类名字无法按普通文件读写。
  * @param storageRoot 工件存储根目录
  * @param artifactRelativePath 工件相对路径
  * @returns 安全的绝对路径
@@ -22,6 +51,14 @@ export function resolveArtifactPath(storageRoot: string, artifactRelativePath: s
     throw new VideoForgeError(
       "PATH_OUTSIDE_STORAGE",
       `Artifact path escapes storage root: ${artifactRelativePath}`,
+    );
+  }
+  const baseName = basename(target);
+  if (isWindowsReservedName(baseName)) {
+    console.error(`[path-safety] rejected reserved device name: ${baseName}`);
+    throw new VideoForgeError(
+      "PATH_OUTSIDE_STORAGE",
+      `Artifact path uses a Windows reserved device name: ${baseName}`,
     );
   }
   console.info(`[path-safety] resolved artifact: ${target}`);
@@ -63,6 +100,16 @@ export function validateProjectName(name: string): string {
         `Invalid project name character ${JSON.stringify(char)} in: ${JSON.stringify(name)}`,
       );
     }
+  }
+  // Windows 保留设备名无法作为目录名落盘（如 `nul` 会被解释为设备），提前拒绝
+  if (isWindowsReservedName(normalized)) {
+    console.error(
+      `[path-safety] rejected project name (reserved device name): ${JSON.stringify(name)}`,
+    );
+    throw new VideoForgeError(
+      "PATH_OUTSIDE_STORAGE",
+      `Project name is a Windows reserved device name: ${JSON.stringify(name)}`,
+    );
   }
   console.info(`[path-safety] validated project name: ${normalized}`);
   return normalized;

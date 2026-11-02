@@ -8,6 +8,8 @@ import { createRun, getRun, listRuns } from "../../db/repositories/run-repositor
 import { listRunStages } from "../../db/repositories/run-stage-repository.js";
 import { getSession, listSessions } from "../../db/repositories/session-repository.js";
 import { listLlmCalls, listToolCalls } from "../../db/repositories/trace-repository.js";
+import { buildRunEvents } from "../../trace/run-events.js";
+import { reconcileRunView } from "../run-view.js";
 
 /**
  * 运行（run）与 trace 路由（见设计文档 §4.2）。
@@ -107,7 +109,11 @@ export function registerRunRoutes(app: FastifyInstance, deps: HttpDeps): void {
     return { run };
   });
 
-  /** run 详情：含各阶段实例状态与 `started_at` / `ended_at`（供前端算耗时）。 */
+  /**
+   * run 详情：含各阶段实例状态与 `started_at` / `ended_at`（供前端算耗时）。
+   * 返回前按工作区产物做视图校正：自由对话里补跑的阶段不会写 `run_stages`，
+   * 若仅按数据库渲染，会出现「成片已生成但阶段条仍显示失败」。
+   */
   app.get("/api/runs/:id", { preHandler: authPreHandler }, async (request, reply) => {
     const actor = requireActor(request);
     const { id } = request.params as { id: string };
@@ -115,8 +121,15 @@ export function registerRunRoutes(app: FastifyInstance, deps: HttpDeps): void {
     if (!run) {
       throw new VideoForgeError("AUTH_FORBIDDEN", `run 不存在：${id}`);
     }
+    const view = reconcileRunView(
+      deps.db,
+      actor,
+      deps.storageRoot,
+      run,
+      listRunStages(deps.db, actor, id),
+    );
     reply.code(200);
-    return { run, stages: listRunStages(deps.db, actor, id) };
+    return { run: view.run, stages: view.stages };
   });
 
   /**
@@ -150,10 +163,13 @@ export function registerRunRoutes(app: FastifyInstance, deps: HttpDeps): void {
   app.post("/api/runs/:id/cancel", { preHandler: authPreHandler }, async (request, reply) => {
     const actor = requireActor(request);
     const { id } = request.params as { id: string };
-    if (!getRun(deps.db, actor, id)) {
+    const existing = getRun(deps.db, actor, id);
+    if (!existing) {
       throw new VideoForgeError("AUTH_FORBIDDEN", `run 不存在：${id}`);
     }
     const run = deps.workflow.cancel(actor, id);
+    // 协作式中止在途 agent 轮次（LLM 请求会被 abort；已在工具内的子进程仍可能跑完，见已知限制）
+    deps.chat.abort(actor, existing.session_id);
     reply.code(200);
     return { run };
   });
@@ -168,10 +184,24 @@ export function registerRunRoutes(app: FastifyInstance, deps: HttpDeps): void {
     }
 
     const { limit, offset } = parsePaging(request.query);
+    // 可选阶段过滤：按阶段名过滤工具 / LLM 调用，total 同步收敛（避免前端只过滤当前页）
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    const stageFilter =
+      typeof query.stage === "string" && query.stage.length > 0 ? query.stage : null;
+
     // 阶段数固定（7），不分页；留痕按 runId 过滤后切片分页
     const stages = listRunStages(deps.db, actor, id);
-    const allToolCalls = listToolCalls(deps.db, actor, run.session_id, { runId: id });
-    const allLlmCalls = listLlmCalls(deps.db, actor, run.session_id, { runId: id });
+    const stageIds = stageFilter
+      ? new Set(stages.filter((row) => row.stage === stageFilter).map((row) => row.id))
+      : null;
+    const rawToolCalls = listToolCalls(deps.db, actor, run.session_id, { runId: id });
+    const rawLlmCalls = listLlmCalls(deps.db, actor, run.session_id, { runId: id });
+    const allToolCalls = stageIds
+      ? rawToolCalls.filter((call) => call.stage_id && stageIds.has(call.stage_id))
+      : rawToolCalls;
+    const allLlmCalls = stageIds
+      ? rawLlmCalls.filter((call) => call.stage_id && stageIds.has(call.stage_id))
+      : rawLlmCalls;
 
     reply.code(200);
     return {
@@ -181,6 +211,8 @@ export function registerRunRoutes(app: FastifyInstance, deps: HttpDeps): void {
       llmCalls: allLlmCalls.slice(offset, offset + limit),
       total: { toolCalls: allToolCalls.length, llmCalls: allLlmCalls.length },
       paging: { limit, offset },
+      // 事件时间线由全量留痕合成（不受分页/阶段过滤影响，前端按选中阶段过滤）
+      events: buildRunEvents(run, stages, rawToolCalls, rawLlmCalls),
     };
   });
 }

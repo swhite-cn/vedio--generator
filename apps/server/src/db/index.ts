@@ -11,4 +11,6 @@ export * from "./repositories/message-repository.js";
 export * from "./repositories/run-repository.js";
 export * from "./repositories/run-stage-repository.js";
 export * from "./repositories/trace-repository.js";
+export * from "./repositories/asset-repository.js";
+export * from "./repositories/agent-action-repository.js";
 export * from "./schema.js";

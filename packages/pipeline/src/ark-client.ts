@@ -81,8 +81,20 @@ export async function arkGenerateImage(options: {
 }
 
 /**
+ * openspeech TTS 行内 code 的成功集合。
+ * 依据 V3 HTTP Chunked 单向流式文档：`0` 为普通成功行，`20000000` 为「音频合成结束」成功码；
+ * 两者都不代表失败，其余 code（如 `55000000` 音色与资源不匹配）才是真实错误。
+ */
+const TTS_SUCCESS_CODES = new Set([0, 20000000]);
+
+/**
  * 调用 openspeech TTS（Agent Plan 单向流式），逐行解析 NDJSON 中的 base64 音频块，
  * 拼接后写入 outputPath；无音频块时抛 ADAPTER_FAILED。
+ *
+ * 注意：鉴权失败、音色与资源不匹配等错误情况下 openspeech 仍返回 HTTP 200，
+ * 真实原因放在行内 `code` / `message`（如 `code=55000000`），必须显式抛出，
+ * 否则会退化成笼统的「不含音频数据」，让调用方与 agent 无法判断失败原因。
+ * 同时必须放行 `20000000` 结束成功码，否则每次成功合成都会被误判为失败。
  */
 export async function arkTtsToFile(options: {
   ttsBaseUrl: string;
@@ -114,11 +126,17 @@ export async function arkTtsToFile(options: {
   for (const line of raw.split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed) continue;
-    let parsed: { data?: string };
+    let parsed: { code?: number; message?: string; data?: string };
     try {
-      parsed = JSON.parse(trimmed) as { data?: string };
+      parsed = JSON.parse(trimmed) as { code?: number; message?: string; data?: string };
     } catch {
       throw new VideoForgeError("ADAPTER_FAILED", "TTS 响应包含无法解析的 NDJSON 行");
+    }
+    // 仅非成功码才算失败（HTTP 仍可能是 200），把真实错误原样透出；
+    // `20000000` 是合成结束成功码，不能当作错误抛出。
+    if (typeof parsed.code === "number" && !TTS_SUCCESS_CODES.has(parsed.code)) {
+      const detail = parsed.message ? ` ${parsed.message}` : "";
+      throw new VideoForgeError("ADAPTER_FAILED", `Ark tts 返回错误：code=${parsed.code}${detail}`);
     }
     if (parsed.data) chunks.push(Buffer.from(parsed.data, "base64"));
   }

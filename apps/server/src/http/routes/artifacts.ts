@@ -6,6 +6,7 @@ import { buildArtifactIndex, type ArtifactIndex } from "../artifacts.js";
 import { getCapability } from "../../workflow/capabilities.js";
 import { resolveUserProjectDir } from "../../domain/storage-layout.js";
 import { getProject } from "../../db/repositories/project-repository.js";
+import { syncGeneratedProjectAssets } from "../../domain/project-assets.js";
 
 /**
  * 项目产物清单路由（见设计文档 §4.2 `/api/projects/:id/artifacts`）。
@@ -35,6 +36,7 @@ export function registerArtifactRoutes(app: FastifyInstance, deps: HttpDeps): vo
     const artifacts: ArtifactIndex = capability
       ? buildArtifactIndex(projectDir, capability, project.profile)
       : { finalVideoExists: false, entries: [] };
+    syncGeneratedProjectAssets(deps.db, actor, project, artifacts);
 
     reply.code(200);
     return { artifacts };

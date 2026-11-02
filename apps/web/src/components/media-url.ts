@@ -11,11 +11,19 @@ import type { Project } from "../stores/projects";
 
 /**
  * 构造项目内某产物文件的媒体访问地址。
+ *
+ * 浏览器原生标签无法携带 `Authorization` 头，故追加媒体短时票据 `?ticket=`；
+ * 票据由 `services/media-ticket.ts` 统一签发与缓存。
  * @param project 所属项目（提供 `user_id` 与 `name`）；缺失时返回空串
  * @param relativePath 相对项目根目录的路径（POSIX `/`，如 `copy.json`、`images/a.png`）
+ * @param ticket 媒体票据；缺省时不追加票据（仅适用于带 Bearer 的 API 调用）
  * @returns 形如 `/api/media/users/<uid>/projects/<name>/<path>` 的相对 URL；入参不全时返回空串
  */
-export function buildMediaUrl(project: Project | null | undefined, relativePath: string): string {
+export function buildMediaUrl(
+  project: Project | null | undefined,
+  relativePath: string,
+  ticket?: string,
+): string {
   if (!project || !relativePath) {
     return "";
   }
@@ -27,5 +35,6 @@ export function buildMediaUrl(project: Project | null | undefined, relativePath:
     .filter((segment) => segment.length > 0)
     .map((segment) => encodeURIComponent(segment))
     .join("/");
-  return `/api/media/users/${user}/projects/${name}/${encodedPath}`;
+  const base = `/api/media/users/${user}/projects/${name}/${encodedPath}`;
+  return ticket && ticket.length > 0 ? `${base}?ticket=${encodeURIComponent(ticket)}` : base;
 }

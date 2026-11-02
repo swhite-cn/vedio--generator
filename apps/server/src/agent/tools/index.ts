@@ -1,7 +1,8 @@
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { mirrorGenerationRecords } from "../../trace/generation-mirror.js";
 import { createBuiltinTools, type BuiltinToolContext } from "./builtin-tools.js";
 import { createStageTools, type StageToolContext } from "./stage-tools.js";
-import { withToolTrace, type ToolTraceOptions } from "./tool-trace.js";
+import { withToolTrace, resolveTraceId, type ToolTraceOptions } from "./tool-trace.js";
 
 /**
  * agent 工具集入口。
@@ -21,6 +22,7 @@ export {
 export {
   withToolTrace,
   toProjectRelativePath,
+  resolveTraceId,
   type ToolTraceOptions,
   type TraceIdSource,
 } from "./tool-trace.js";
@@ -32,12 +34,66 @@ export {
   type BuiltinToolContext,
 } from "./builtin-tools.js";
 
+export {
+  applyCommandGuardrails,
+  withCommandGuardrails,
+  type CommandGuardrailRule,
+  type GuardrailOutcome,
+} from "./command-guardrails.js";
+
+export {
+  createToolFailureState,
+  stableStringify,
+  withToolCircuitBreaker,
+  type ToolCircuitBreakerOptions,
+  type ToolFailureState,
+} from "./tool-circuit-breaker.js";
+
 /** 组合工具的上下文：阶段工具与内置工具各用各自既有上下文，避免重复定义一套运行参数。 */
 export interface AgentToolComposition {
   /** 既有阶段工具上下文（项目目录、画幅、风格、runId、配置）。 */
   stage: StageToolContext;
   /** 内置工具上下文（项目目录、放开策略、留痕上下文）。 */
   builtin: BuiltinToolContext;
+}
+
+/**
+ * 给阶段工具补一层「生成清单 → llm_calls」镜像。
+ *
+ * 阶段生成的模型调用发生在 `packages/pipeline` 内部，不经过 Pi provider，因此不会自动留痕。
+ * 这里在工具执行结束后把本次新增的生成记录镜像为 LLM 调用，让 trace 页能同时看到生成阶段的
+ * 提示词与模型信息；镜像失败不影响工具结果。
+ * @param tool 原始阶段工具
+ * @param builtin 内置工具上下文（提供 trace / sessionId / runId / stageId / projectDir）
+ * @returns 已挂上生成留痕的工具；无 trace 时原样返回
+ */
+function withGenerationMirror(
+  tool: ToolDefinition<any, any>,
+  builtin: BuiltinToolContext,
+): ToolDefinition<any, any> {
+  const trace = builtin.trace;
+  if (!trace) return tool;
+  return {
+    ...tool,
+    async execute(toolCallId: string, params: any, signal: any, onUpdate: any, ctx: any) {
+      const startedAtIso = new Date().toISOString();
+      try {
+        return await tool.execute(toolCallId, params, signal, onUpdate, ctx);
+      } finally {
+        mirrorGenerationRecords(
+          {
+            trace,
+            sessionId: builtin.sessionId,
+            runId: resolveTraceId(builtin.runId),
+            stageId: resolveTraceId(builtin.stageId),
+            projectDir: builtin.projectDir,
+          },
+          tool.name,
+          startedAtIso,
+        );
+      }
+    },
+  };
 }
 
 /**
@@ -53,11 +109,13 @@ export interface AgentToolComposition {
  * @returns 阶段工具在前、内置工具在后的工具定义数组
  */
 export function createAgentTools(composition: AgentToolComposition): ToolDefinition<any, any>[] {
-  const stageTools = createStageTools(composition.stage) as ToolDefinition<any, any>[];
+  const stageTools = (createStageTools(composition.stage) as ToolDefinition<any, any>[]).map(
+    (tool) => withGenerationMirror(tool, composition.builtin),
+  );
   // createBuiltinTools 内部已按同一上下文包装留痕（trace 缺省时退化为不包装）
   const builtinTools = createBuiltinTools(composition.builtin);
 
-  const { trace, sessionId, runId, stageId, projectDir } = composition.builtin;
+  const { trace, sessionId, runId, stageId, projectDir, outputPreviewChars } = composition.builtin;
   if (!trace) {
     return [...stageTools, ...builtinTools];
   }
@@ -68,6 +126,7 @@ export function createAgentTools(composition: AgentToolComposition): ToolDefinit
     runId,
     stageId,
     projectDir,
+    outputPreviewChars,
   };
   return [...stageTools.map((tool) => withToolTrace(tool, traceOptions)), ...builtinTools];
 }

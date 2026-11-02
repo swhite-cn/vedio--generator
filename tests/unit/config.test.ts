@@ -22,13 +22,26 @@ function minimalDefaultYaml(): string {
     "runtime:",
     '  storage_root: "storage"',
     "  max_concurrent_stage: 1",
+    "  scene_concurrency: 3",
     "  minimum_free_disk_gb: 30",
+    "assets:",
+    "  max_upload_bytes: 52428800",
+    "  max_project_upload_bytes: 524288000",
+    "  max_message_refs: 12",
     "tools:",
     '  chromium_path: ""',
     '  ffmpeg_path: "ffmpeg"',
     '  ffprobe_path: "ffprobe"',
     "agent:",
     "  allow_shell_write_edit: true",
+    "  show_thinking: true",
+    "  tool_output_preview_chars: 8192",
+    "  tool_failure_circuit_breaker: 3",
+    "  command_guardrails:",
+    '    - id: "fixture-rule"',
+    '      pattern: "2>nul"',
+    '      action: "reject"',
+    '      hint: "丢弃 stderr 请用 2>/dev/null"',
     "workflow:",
     "  max_stage_retry: 2",
     "engines:",
@@ -76,7 +89,19 @@ describe("系统配置加载", () => {
     expect(config.server.max_projects_per_user).toBe(50);
     // 新增运行时 / agent / workflow 字段
     expect(config.runtime.max_concurrent_stage).toBe(1);
+    expect(config.runtime.scene_concurrency).toBe(3);
+    expect(config.assets.max_upload_bytes).toBe(52428800);
+    expect(config.assets.max_project_upload_bytes).toBe(524288000);
+    expect(config.assets.max_message_refs).toBe(12);
     expect(config.agent.allow_shell_write_edit).toBe(true);
+    expect(config.agent.show_thinking).toBe(true);
+    expect(config.agent.tool_output_preview_chars).toBe(8192);
+    expect(config.agent.tool_failure_circuit_breaker).toBe(3);
+    // 拆分配置：flags 未写时回退空串（区分大小写）
+    expect(config.agent.command_guardrails).toHaveLength(1);
+    expect(config.agent.command_guardrails[0].id).toBe("fixture-rule");
+    expect(config.agent.command_guardrails[0].action).toBe("reject");
+    expect(config.agent.command_guardrails[0].flags).toBe("");
     expect(config.workflow.max_stage_retry).toBe(2);
     expect(config.runtime.storage_root).toMatch(/[\\/]/);
     expect(config.runtime.storage_root).toContain("storage");
@@ -131,6 +156,61 @@ describe("系统配置加载", () => {
     ).toThrowError(/CONFIG_INVALID/);
     expect(() =>
       loadSystemConfig({ rootDir: root, override: { runtime: { max_concurrent_stage: 0 } } }),
+    ).toThrowError(/CONFIG_INVALID/);
+    expect(() =>
+      loadSystemConfig({ rootDir: root, override: { assets: { max_message_refs: 33 } } }),
+    ).toThrowError(/CONFIG_INVALID/);
+    expect(() =>
+      loadSystemConfig({
+        rootDir: root,
+        override: { assets: { max_upload_bytes: 100, max_project_upload_bytes: 99 } },
+      }),
+    ).toThrowError(/CONFIG_INVALID/);
+  });
+
+  it("agent 熔断阈值与护栏规则的非法取值会被校验拒绝", () => {
+    const root = makeRoot();
+    // 熔断阈值越界
+    for (const value of [-1, 21]) {
+      expect(() =>
+        loadSystemConfig({
+          rootDir: root,
+          override: { agent: { tool_failure_circuit_breaker: value } },
+        }),
+      ).toThrowError(/CONFIG_INVALID/);
+    }
+    // action=rewrite 缺 replacement
+    expect(() =>
+      loadSystemConfig({
+        rootDir: root,
+        override: {
+          agent: { command_guardrails: [{ id: "r1", pattern: "x", action: "rewrite", hint: "h" }] },
+        },
+      }),
+    ).toThrowError(/CONFIG_INVALID/);
+    // pattern 不是合法正则
+    expect(() =>
+      loadSystemConfig({
+        rootDir: root,
+        override: {
+          agent: {
+            command_guardrails: [{ id: "r2", pattern: "(", action: "reject", hint: "h" }],
+          },
+        },
+      }),
+    ).toThrowError(/CONFIG_INVALID/);
+    // flags 含非法字符
+    expect(() =>
+      loadSystemConfig({
+        rootDir: root,
+        override: {
+          agent: {
+            command_guardrails: [
+              { id: "r3", pattern: "x", flags: "z", action: "reject", hint: "h" },
+            ],
+          },
+        },
+      }),
     ).toThrowError(/CONFIG_INVALID/);
   });
 

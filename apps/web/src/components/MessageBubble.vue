@@ -7,10 +7,13 @@
  * - `tool` / `review`：委托 `ToolCallCard` / `ReviewCard`（非气泡）。
  */
 import { computed, ref } from "vue";
+import { RobotOutlined, UserOutlined } from "@ant-design/icons-vue";
 import MessageBubbleTool from "./ToolCallCard.vue";
 import ReviewCard from "./ReviewCard.vue";
+import ThinkingBlock from "./ThinkingBlock.vue";
 import { renderMarkdownLite } from "./markdown-lite";
 import { formatDateTime } from "./format";
+import { STAGE_LABELS } from "./state-mapping";
 import type { ResumePayload } from "./review-logic";
 import type { WorkbenchMessage } from "../stores/workbench-reducer";
 import type { Project } from "../stores/projects";
@@ -69,6 +72,23 @@ function onReviewSubmit(payload: ResumePayload): void {
     @submit="onReviewSubmit"
   />
 
+  <!-- 思考过程 -->
+  <thinking-block
+    v-else-if="message.kind === 'thinking'"
+    :text="message.text"
+    :streaming="message.streaming"
+  />
+
+  <!-- 错误条 -->
+  <div v-else-if="message.kind === 'error'" class="msg-error" role="alert">
+    {{ message.text }}
+  </div>
+
+  <!-- 阶段分隔条：居中胶囊，与 Claude Code 的阶段标题一致 -->
+  <div v-else-if="message.kind === 'stageDivider'" class="msg-divider">
+    <span>引擎指令：执行 {{ STAGE_LABELS[message.text ?? ""] ?? message.text }} 阶段</span>
+  </div>
+
   <!-- 系统条（引擎阶段指令）：居中浅灰可折叠 -->
   <div v-else-if="message.kind === 'system'" class="msg-system">
     <button
@@ -83,49 +103,83 @@ function onReviewSubmit(payload: ResumePayload): void {
     <div v-else class="system-body">{{ message.text }}</div>
   </div>
 
-  <!-- 用户 / assistant 气泡 -->
+  <!-- 用户 / assistant 气泡（含头像，对齐设计稿） -->
   <div v-else class="msg-row" :class="message.kind === 'user' ? 'is-user' : 'is-assistant'">
-    <div class="msg-bubble" aria-live="polite">
-      <!-- assistant 为受限 Markdown；user 直接文本 -->
-      <div v-if="message.kind === 'assistant'" class="msg-markdown" v-html="assistantHtml" />
-      <span v-else class="msg-text">{{ message.text }}</span>
-      <span v-if="message.streaming" class="msg-cursor" aria-hidden="true">▍</span>
+    <span class="msg-avatar" aria-hidden="true">
+      <user-outlined v-if="message.kind === 'user'" />
+      <robot-outlined v-else />
+    </span>
+    <div class="msg-column">
+      <div class="msg-bubble" aria-live="polite">
+        <!-- assistant 为受限 Markdown；user 直接文本 -->
+        <div v-if="message.kind === 'assistant'" class="msg-markdown" v-html="assistantHtml" />
+        <span v-else class="msg-text">{{ message.text }}</span>
+        <span v-if="message.streaming" class="msg-cursor" aria-hidden="true">▍</span>
+      </div>
+      <div v-if="message.kind === 'user' && message.assetRefs?.length" class="asset-refs">
+        <span v-for="asset in message.assetRefs" :key="asset.id" class="asset-ref">
+          {{ asset.kind }} · {{ asset.label }}
+        </span>
+      </div>
+      <span v-if="timeText !== '-'" class="msg-time">{{ timeText }}</span>
     </div>
-    <span v-if="timeText !== '-'" class="msg-time">{{ timeText }}</span>
   </div>
 </template>
 
 <style scoped>
 .msg-row {
   display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.msg-row.is-user {
+  flex-direction: row-reverse;
+}
+
+.msg-column {
+  display: flex;
+  min-width: 0;
   flex-direction: column;
   gap: 2px;
 }
 
-.msg-row.is-user {
+.is-user .msg-column {
   align-items: flex-end;
 }
 
-.msg-row.is-assistant {
-  align-items: flex-start;
+.msg-avatar {
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--vf-primary);
+  color: #fff;
+  font-size: 15px;
 }
 
 .msg-bubble {
   max-width: 86%;
-  padding: 8px 12px;
+  padding: 9px 13px;
   border-radius: 10px;
   word-break: break-word;
 }
 
 .is-user .msg-bubble {
-  background: #1677ff;
+  border-top-right-radius: 2px;
+  background: var(--vf-primary);
   color: #fff;
   white-space: pre-wrap;
 }
 
 .is-assistant .msg-bubble {
-  background: #fff;
-  border: 1px solid #f0f0f0;
+  max-width: 100%;
+  border: 1px solid var(--vf-border);
+  border-top-left-radius: 2px;
+  background: var(--vf-surface);
 }
 
 .msg-markdown :deep(p) {
@@ -164,12 +218,51 @@ function onReviewSubmit(payload: ResumePayload): void {
   color: #1677ff;
 }
 
+.asset-refs {
+  display: flex;
+  max-width: 86%;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.asset-ref {
+  padding: 2px 7px;
+  border: 1px solid #bae0ff;
+  border-radius: 999px;
+  background: #e6f4ff;
+  color: #0958d9;
+  font-size: 11px;
+}
+
 .msg-system {
   display: flex;
   flex-direction: column;
   align-items: center;
   color: rgb(0 0 0 / 45%);
   font-size: 12px;
+}
+
+.msg-error {
+  padding: 6px 10px;
+  border: 1px solid #ffccc7;
+  border-radius: 6px;
+  background: #fff2f0;
+  color: #cf1322;
+  font-size: 12px;
+}
+
+.msg-divider {
+  display: flex;
+  justify-content: center;
+  font-size: 12px;
+}
+
+.msg-divider span {
+  padding: 3px 12px;
+  border-radius: 999px;
+  background: #f2f4f7;
+  color: var(--vf-text-tertiary);
 }
 
 .system-toggle {

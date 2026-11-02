@@ -8,7 +8,10 @@ import { registerSessionRoutes } from "./routes/sessions.js";
 import { registerRunRoutes } from "./routes/runs.js";
 import { registerArtifactRoutes } from "./routes/artifacts.js";
 import { registerMediaRoutes } from "./routes/media.js";
+import { registerProfileRoutes } from "./routes/profiles.js";
 import { registerAdminRoutes } from "./routes/admin.js";
+import { registerAssetRoutes } from "./routes/assets.js";
+import { registerAgentActionRoutes } from "./routes/agent-actions.js";
 
 /**
  * 注册全部 HTTP 路由与统一错误处理。
@@ -22,9 +25,12 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpDeps): void {
   registerAuthRoutes(app, deps);
   registerCapabilityRoutes(app, deps);
   registerProjectRoutes(app, deps);
+  registerAssetRoutes(app, deps);
+  registerAgentActionRoutes(app, deps);
   registerSessionRoutes(app, deps);
   registerRunRoutes(app, deps);
   registerArtifactRoutes(app, deps);
   registerMediaRoutes(app, deps);
+  registerProfileRoutes(app, deps);
   registerAdminRoutes(app, deps);
 }

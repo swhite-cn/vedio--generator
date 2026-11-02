@@ -10,7 +10,7 @@ import {
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { SystemConfig } from "@videoforge/pipeline";
 import { VideoForgeError, type Actor } from "@videoforge/shared";
-import { listMessages } from "../db/repositories/message-repository.js";
+import { listMessages, appendMessage } from "../db/repositories/message-repository.js";
 import { getProject } from "../db/repositories/project-repository.js";
 import { getSession } from "../db/repositories/session-repository.js";
 import { resolveUserProjectDir } from "../domain/storage-layout.js";
@@ -35,6 +35,64 @@ import { createAgentTools, resolveOutputProfile } from "./tools/index.js";
 
 /** 会话空闲超时（30 分钟，代码常量，不进配置）。 */
 export const SESSION_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+
+/** 单条消息落库上限（字符数）；超出部分截断，避免大文件读取撑爆 SQLite。 */
+export const MESSAGE_PAYLOAD_MAX_CHARS = 64 * 1024;
+
+/**
+ * 压缩超长消息负载（只截断文本块，保留消息结构以便重放）。
+ * @param message Pi 原生消息
+ * @param maxChars 字符上限
+ * @returns 可落库的负载
+ */
+function capMessagePayload(message: unknown, maxChars = MESSAGE_PAYLOAD_MAX_CHARS): unknown {
+  const raw = JSON.stringify(message ?? null);
+  if (raw.length <= maxChars) return message;
+  try {
+    const clone = JSON.parse(raw) as { content?: unknown };
+    if (Array.isArray(clone.content)) {
+      let remaining = maxChars;
+      clone.content = clone.content.map((part: any) => {
+        if (part && typeof part.text === "string") {
+          if (part.text.length > remaining) {
+            const text = `${part.text.slice(0, Math.max(0, remaining))}\n…（内容过长已截断）`;
+            remaining = 0;
+            return { ...part, text };
+          }
+          remaining -= part.text.length;
+        }
+        return part;
+      });
+    }
+    return clone;
+  } catch {
+    return message;
+  }
+}
+
+/**
+ * 移除消息中的思考过程内容块（`agent.show_thinking=false` 时思考内容不落库）。
+ * @param message Pi 原生消息
+ * @returns 去掉 `thinking` 块后的消息；结构不符合预期时原样返回
+ */
+function stripThinkingBlocks(message: unknown): unknown {
+  if (!message || typeof message !== "object") return message;
+  const content = (message as { content?: unknown }).content;
+  if (!Array.isArray(content)) return message;
+  return {
+    ...(message as Record<string, unknown>),
+    content: content.filter((part) => (part as { type?: unknown } | null)?.type !== "thinking"),
+  };
+}
+
+/**
+ * 判断会话事件是否为思考过程增量（Pi 的 `thinking_delta`）。
+ * @param event Pi 会话事件
+ * @returns 是则返回 true
+ */
+function isThinkingDeltaEvent(event: AgentSessionEvent): boolean {
+  return event.type === "message_update" && event.assistantMessageEvent.type === "thinking_delta";
+}
 
 /**
  * SDK 端口：生产实现直接用 Pi SDK；单元测试注入假实现。
@@ -263,6 +321,11 @@ export function createSessionRegistry(options: AgentSessionRegistryOptions): Age
         builtin: {
           projectDir,
           allowShellWriteEdit: config.agent.allow_shell_write_edit,
+          // 工具输出预览上限：来自配置 `agent.tool_output_preview_chars`（超出截断，全文不落库）
+          outputPreviewChars: config.agent.tool_output_preview_chars,
+          // bash 命令预检护栏与重复失败熔断：规则与阈值全部来自配置（config/default.yaml 的 agent 段）
+          commandGuardrails: config.agent.command_guardrails,
+          toolFailureCircuitBreaker: config.agent.tool_failure_circuit_breaker,
           trace: resolvedTrace,
           sessionId,
           runId: () => stageTrace.runId,
@@ -290,10 +353,48 @@ export function createSessionRegistry(options: AgentSessionRegistryOptions): Age
         noTools: "builtin",
       });
 
-      // 9) 统一订阅一次会话事件（含阶段执行期间），避免工作流与自由对话并发时重复推送
+      /**
+       * 把 Pi 的完成消息（assistant / toolResult）落库。
+       * 只落这两类：user 消息由 HTTP 路由写入，system 阶段指令由引擎写入，避免重复。
+       * @param id 会话 id
+       * @param event Pi 会话事件
+       */
+      function persistCompletedMessage(id: string, event: AgentSessionEvent): void {
+        if (event.type !== "message_end") return;
+        const message = event.message as { role?: unknown } | undefined;
+        const role =
+          message?.role === "assistant"
+            ? "assistant"
+            : message?.role === "toolResult" || message?.role === "tool"
+              ? "tool"
+              : null;
+        if (!role) return;
+        try {
+          appendMessage(db, actor, {
+            sessionId: id,
+            role,
+            // 思考关闭时不落库 thinking 块，历史回放与实时视图保持一致
+            payload: capMessagePayload(
+              config.agent.show_thinking ? message : stripThinkingBlocks(message),
+            ),
+            runId: stageTrace.runId ?? null,
+          });
+        } catch (error) {
+          console.warn(
+            `[session-registry] 消息落库失败：${id}（${error instanceof Error ? error.message : String(error)}）`,
+          );
+        }
+      }
+
+      // 9) 统一订阅一次会话事件（含阶段执行期间），避免工作流与自由对话并发时重复推送；
+      //    同时把 assistant / toolResult 消息落库，供历史回放与会话重建（修复空闲回收后上下文丢失）。
       const unsubscribe =
-        onSessionEvent && typeof agentSession.subscribe === "function"
+        typeof agentSession.subscribe === "function"
           ? agentSession.subscribe((event: AgentSessionEvent) => {
+              // 思考关闭时不转发 thinking_delta，前端不产生思考块（正文与工具事件不受影响）
+              if (!config.agent.show_thinking && isThinkingDeltaEvent(event)) return;
+              persistCompletedMessage(sessionId, event);
+              if (!onSessionEvent) return;
               try {
                 onSessionEvent(sessionId, event);
               } catch (error) {

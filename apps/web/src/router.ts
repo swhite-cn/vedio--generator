@@ -2,7 +2,7 @@
  * 路由表与全局前置守卫（Web 专题 §3.1、§3.2）。
  *
  * 已登记视图：`/login`、`/` 重定向、`/capabilities`、`/projects`、
- * `/projects/:id`（工作台，`layout: "workbench"`）、`/runs/:id/trace`、
+ * `/projects/:id`（工作台）、`/runs/:id/trace`、
  * `/settings`、`/admin`（`requiresAdmin`）。
  */
 import { createRouter, createWebHistory } from "vue-router";
@@ -23,8 +23,8 @@ export const router = createRouter({
     { path: "/", redirect: "/projects" },
     { path: "/capabilities", component: CapabilitiesView },
     { path: "/projects", component: ProjectsView },
-    // 工作台：隐藏侧边栏为对话流让出宽度（Web 专题 §4）
-    { path: "/projects/:id", component: WorkbenchView, meta: { layout: "workbench" } },
+    // 工作台：与其他页面共用顶栏 + 侧边栏外壳（Web 专题 §4）
+    { path: "/projects/:id", component: WorkbenchView },
     { path: "/runs/:id/trace", component: RunTraceView },
     { path: "/settings", component: SettingsView },
     { path: "/admin", component: AdminView, meta: { requiresAdmin: true } },

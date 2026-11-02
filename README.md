@@ -101,6 +101,9 @@ pnpm run web:dev
 - Ark `base_url` **必须**保持 `https://ark.cn-beijing.volces.com/api/plan/v3`；改成 `/api/v3` 会产生额外费用。
 - `chat_model` 为占位值（`PLEASE_FILL_CHAT_MODEL_ID`）时，`copy` 阶段会拒绝执行。
 - 提示词已配置化：`config/prompts/<集名>/` 下三个模板文件，默认集由 `prompts.default_set` 决定。
+- Agent 行为开关：`agent.allow_shell_write_edit`（默认 `true`，是否放开 `bash` / `write` / `edit`）、`agent.show_thinking`（默认 `true`，是否推送并持久化模型思考过程）、`agent.tool_output_preview_chars`（默认 `8192`，范围 256-65536，工具输出预览上限，超出截断）。
+- 工具防护：`agent.tool_failure_circuit_breaker`（默认 `3`，范围 0-20，相同「工具 + 参数」连续失败达此次数后硬熔断，`0` 关闭）与 `agent.command_guardrails`（bash 命令预检护栏规则列表，默认把 cmd 风格 `2>nul` 改写为 `2>/dev/null`；规则是配置数据，新增防护只需追加一条，置 `[]` 关闭）。
+- 并发：`runtime.max_concurrent_stage`（默认 `1`，阶段工具全局并发上限，避免 ffmpeg/Chromium 争抢）与 `runtime.scene_concurrency`（默认 `3`，范围 1-8，场景生成内部并发度；属纯网络 IO，可独立调大以缩短 scene 阶段耗时，过大可能触发 Ark 限流）。
 
 ## 常用命令
 
@@ -147,16 +150,15 @@ stdout 只输出一行机器可读 JSON，诊断信息走 stderr；未知命令�
 ## 已知限制
 
 - 真实 Ark 端到端验收需自备账号与模型；`pnpm test:smoke` 只覆盖真 Chromium 渲染段。
-- `POST /api/runs/:id/cancel` 只把 run 置为 `canceled`，不终止在途阶段。
-- trace 页「事件」Tab 暂无后端查询路由；`GET /api/admin/projects` 不做项目状态推导。
-- 新建项目的输出 Profile 目前为前端固定两项（服务端未提供 Profile 列表接口）。
+- `POST /api/runs/:id/cancel` 会把 run 置为 `canceled` 并协作式中止在途 agent 轮次（LLM 请求被 abort，引擎在各阶段边界检查取消标记）；已进入子进程的工具调用仍可能跑完。
+- trace 页「事件」Tab 的时间线由 `runs` / `run_stages` / `tool_calls` / `llm_calls` 合成，不是原始 SSE 事件流（设计上不建 events 表）。
 - 当前无 ESLint 规则集，代码风格由 Prettier + `tsc` 约束。
 
 ## 路线图
 
-- [ ] 在途阶段可真正取消（协作式中止）
-- [ ] trace「事件」时间线查询接口
-- [ ] Profile 列表接口与更多输出画幅
+- [ ] 子进程级强制取消（ffmpeg / Playwright 中断）
+- [ ] 原始事件流事件表与回放
+- [ ] 更多输出画幅与自定义 Profile
 - [ ] ESLint 规则集与 CI 质量门槛
 - [ ] Linux / macOS 兼容性验证
 

@@ -60,11 +60,17 @@ describe("Ark 客户端", () => {
     expect(buf.toString()).toBe("fake-png");
   });
 
-  it("arkTtsToFile 解析 NDJSON 流并拼接写盘", async () => {
+  it("arkTtsToFile 解析 NDJSON 流并拼接写盘（20000000 结束码视为成功）", async () => {
     const chunk1 = Buffer.from("audio-1").toString("base64");
     const chunk2 = Buffer.from("audio-2").toString("base64");
     const ndjson =
-      JSON.stringify({ data: chunk1 }) + "\n" + JSON.stringify({ data: chunk2 }) + "\n";
+      JSON.stringify({ data: chunk1 }) +
+      "\n" +
+      JSON.stringify({ data: chunk2 }) +
+      "\n" +
+      // openspeech 以 code=20000000 标记「音频合成结束」，属于成功码而非错误
+      JSON.stringify({ code: 20000000, message: "ok" }) +
+      "\n";
     vi.stubGlobal(
       "fetch",
       vi
@@ -104,6 +110,31 @@ describe("Ark 客户端", () => {
           outputPath: join(dir, "a.mp3"),
         }),
       ).rejects.toThrowError(/ADAPTER_FAILED/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("arkTtsToFile 在 HTTP 200 但行内 code 非成功码时透出真实错误", async () => {
+    // 复现 openspeech 音色不匹配：HTTP 200，错误只放在 code/message 中
+    const errorLine = JSON.stringify({
+      reqid: "",
+      code: 55000000,
+      message: "resource ID is mismatched with speaker related resource",
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(errorLine, { status: 200 })));
+    const dir = mkdtempSync(join(tmpdir(), "vf-tts-"));
+    try {
+      await expect(
+        arkTtsToFile({
+          ttsBaseUrl: "https://x",
+          apiKey: "k",
+          resourceId: "r",
+          text: "你好",
+          speaker: "bad",
+          outputPath: join(dir, "a.mp3"),
+        }),
+      ).rejects.toThrowError(/55000000/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

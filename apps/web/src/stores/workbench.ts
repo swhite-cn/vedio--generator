@@ -10,6 +10,7 @@ import { defineStore } from "pinia";
 import { message } from "ant-design-vue";
 import { apiRequest, formatApiError } from "../services/api";
 import { subscribeSessionEvents, type SseFrame } from "../services/sse";
+import { mapHistoryMessages, type ServerMessage } from "./history-messages";
 import type { Project } from "./projects";
 import {
   applyEvent,
@@ -35,6 +36,9 @@ type ServerStageRow = {
 /** 本地乐观消息自增序号（避免与服务端 / reducer 生成的 id 冲突）。 */
 let localSeq = 0;
 
+/** 历史消息单页条数（与服务端 `listMessagesPage` 上限一致）。 */
+const HISTORY_PAGE_SIZE = 200;
+
 /**
  * 生成本地乐观消息 id。
  * @param prefix 前缀（如 `user`）
@@ -56,9 +60,15 @@ export const useWorkbenchStore = defineStore("workbench", () => {
   const sending = ref(false);
   /** 页头动作（发起 / 取消 run）进行中。 */
   const actionPending = ref(false);
+  /** 是否还有更早的历史消息（供「加载更早」入口显隐）。 */
+  const hasMoreHistory = ref(false);
+  /** 正在加载更早的历史消息。 */
+  const loadingEarlier = ref(false);
 
   /** 当前项目 id（SSE / 重拉用）。 */
   let currentProjectId = "";
+  /** 历史分页游标：加载更早消息时传给服务端 `before`（`null` 表示已到最早）。 */
+  let historyBefore: string | null = null;
   /** SSE 退订函数。 */
   let unsubscribe: (() => void) | null = null;
 
@@ -142,7 +152,81 @@ export const useWorkbenchStore = defineStore("workbench", () => {
   }
 
   /**
-   * 装载工作台：重置状态 → 拉取数据 → 订阅会话 SSE。
+   * 拉取会话历史消息并映射为对话流（刷新 / 重连 / resync 后恢复对话）。
+   * 若 run 处于待审核且历史中没有审核卡，则按当前阶段补一张。
+   * @param sessionId 会话 id
+   */
+  async function loadHistory(sessionId: string): Promise<void> {
+    try {
+      const result = await apiRequest<{
+        messages: ServerMessage[];
+        hasMore: boolean;
+        nextBefore: string | null;
+      }>(`/api/sessions/${encodeURIComponent(sessionId)}/messages?limit=${HISTORY_PAGE_SIZE}`);
+      const messages = mapHistoryMessages(result.messages);
+      // 记录分页游标，供「加载更早」继续向上翻页
+      historyBefore = result.nextBefore;
+      hasMoreHistory.value = result.hasMore;
+      const run = state.value.currentRun;
+      if (run?.status === "waiting_review" && run.current_stage) {
+        const hasReview = messages.some((item) => item.kind === "review");
+        if (!hasReview) {
+          const artifacts = (state.value.artifacts?.entries ?? [])
+            .filter((entry) => entry.stage === run.current_stage)
+            .map((entry) => entry.relativePath);
+          messages.push({
+            id: `review-restored-${run.id}`,
+            kind: "review",
+            review: {
+              runId: run.id,
+              stage: run.current_stage,
+              summary: artifacts.length > 0 ? artifacts.join("、") : "阶段产物已就绪，等待确认",
+            },
+          });
+        }
+      }
+      state.value = { ...state.value, messages };
+    } catch (error) {
+      console.warn("[web-store] 会话历史加载失败，仅保留实时消息", error);
+    }
+  }
+
+  /**
+   * 向上加载更早的历史消息（游标分页），把结果**前置**到对话流。
+   *
+   * 注意：跨页边界的 `toolCall` 与 `toolResult` 若被切分到两页，较早一页的孤立 toolResult 会被
+   * `mapHistoryMessages` 忽略（对应卡片不在本批），属分页的已知边界，不影响正文对话。
+   * @throws 服务端返回错误时原样抛出（由调用方提示）
+   */
+  async function loadEarlier(): Promise<void> {
+    const sessionId = state.value.session?.id;
+    if (!sessionId || !historyBefore || loadingEarlier.value) return;
+    loadingEarlier.value = true;
+    try {
+      const result = await apiRequest<{
+        messages: ServerMessage[];
+        hasMore: boolean;
+        nextBefore: string | null;
+      }>(
+        `/api/sessions/${encodeURIComponent(sessionId)}/messages?limit=${HISTORY_PAGE_SIZE}&before=${encodeURIComponent(historyBefore)}`,
+      );
+      const older = mapHistoryMessages(result.messages);
+      historyBefore = result.nextBefore;
+      hasMoreHistory.value = result.hasMore;
+      if (older.length > 0) {
+        state.value = { ...state.value, messages: [...older, ...state.value.messages] };
+      }
+      console.info(`[web-store] 已加载更早消息 ${older.length} 条（还有更早：${result.hasMore}）`);
+    } catch (error) {
+      message.error(formatApiError(error));
+      throw error;
+    } finally {
+      loadingEarlier.value = false;
+    }
+  }
+
+  /**
+   * 装载工作台：重置状态 → 拉取数据 → 拉取历史 → 订阅会话 SSE。
    * @param projectId 项目 id
    */
   async function load(projectId: string): Promise<void> {
@@ -150,9 +234,13 @@ export const useWorkbenchStore = defineStore("workbench", () => {
     currentProjectId = projectId;
     loading.value = true;
     loadError.value = null;
+    // 重置分页游标：全量装载后从最新一页重新开始向上翻页
+    historyBefore = null;
+    hasMoreHistory.value = false;
     try {
       await fetchAll(projectId);
       if (state.value.session) {
+        await loadHistory(state.value.session.id);
         subscribe(state.value.session.id);
       }
       console.info(`[web-store] 工作台已加载：${projectId}`);
@@ -216,11 +304,13 @@ export const useWorkbenchStore = defineStore("workbench", () => {
       message.error(`操作失败：${next.lastError.message}（${next.lastError.code}）`);
       state.value = { ...state.value, lastError: null };
     }
-    // tool_end / run_stage(done) / run_end(done) → 产物面板局部刷新
+    // tool_end / run_stage(done) / run_end(done) → 产物面板局部刷新，并重拉阶段进度：
+    // 自由对话里补跑阶段工具不会发 run_stage 事件，只有重拉才能拿到服务端的产物校正结果。
     if (next.artifactRefreshToken !== previous.artifactRefreshToken) {
       void refreshProjectArtifacts().catch((error) =>
         console.warn("[web-store] 产物面板刷新失败", error),
       );
+      void refreshRun().catch((error) => console.warn("[web-store] 阶段进度刷新失败", error));
     }
     // resync → 全量重拉
     if (next.needsResync && !previous.needsResync) {
@@ -243,8 +333,9 @@ export const useWorkbenchStore = defineStore("workbench", () => {
   /**
    * 发送用户消息（乐观追加用户气泡，随后交给服务端对话端口）。
    * @param text 消息文本
+   * @param assetIds 当前草稿引用的项目资产 ID
    */
-  async function sendMessage(text: string): Promise<void> {
+  async function sendMessage(text: string, assetIds: string[] = []): Promise<void> {
     const sessionId = state.value.session?.id;
     const trimmed = text.trim();
     if (!sessionId || trimmed.length === 0) return;
@@ -253,14 +344,20 @@ export const useWorkbenchStore = defineStore("workbench", () => {
       ...state.value,
       messages: [
         ...state.value.messages,
-        { id: nextLocalId("user"), kind: "user", text: trimmed, at: new Date().toISOString() },
+        {
+          id: nextLocalId("user"),
+          kind: "user",
+          text: trimmed,
+          at: new Date().toISOString(),
+          assetRefs: assetIds.map((id) => ({ id, label: "已引用资产", kind: "asset" })),
+        },
       ],
     };
     sending.value = true;
     try {
       await apiRequest(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
         method: "POST",
-        body: { text: trimmed },
+        body: { text: trimmed, assetIds },
       });
     } catch (error) {
       message.error(formatApiError(error));
@@ -377,6 +474,8 @@ export const useWorkbenchStore = defineStore("workbench", () => {
   function dispose(): void {
     disposeSse();
     currentProjectId = "";
+    historyBefore = null;
+    hasMoreHistory.value = false;
   }
 
   return {
@@ -385,6 +484,8 @@ export const useWorkbenchStore = defineStore("workbench", () => {
     loadError,
     sending,
     actionPending,
+    hasMoreHistory,
+    loadingEarlier,
     project,
     session,
     currentRun,
@@ -399,6 +500,7 @@ export const useWorkbenchStore = defineStore("workbench", () => {
     dispose,
     refreshRun,
     refreshProjectArtifacts,
+    loadEarlier,
     sendMessage,
     startRun,
     cancelRun,

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -114,6 +114,34 @@ describe("内置工具集：工具集差异（allow_shell_write_edit）", () => 
   });
 });
 
+describe("内置工具集：输出预览上限透传（agent.tool_output_preview_chars）", () => {
+  test("createBuiltinTools 按 context.outputPreviewChars 截断留痕输出", async () => {
+    const { trace, recordToolCall } = createMockTrace();
+    writeFileSync(join(projectDir, "big.txt"), "y".repeat(400), "utf-8");
+    const tools = createBuiltinTools({
+      projectDir,
+      allowShellWriteEdit: false,
+      sessionId: "s1",
+      trace,
+      outputPreviewChars: 32,
+    });
+    const read = tools.find((tool) => tool.name === "read");
+    expect(read).toBeDefined();
+
+    await read!.execute(
+      "call-1",
+      { path: "big.txt" } as any,
+      undefined,
+      undefined,
+      undefined as any,
+    );
+
+    const input = recordToolCall.mock.calls[0][0];
+    expect(input.outputPreview).toHaveLength(32);
+    expect(input.outputTruncated).toBe(true);
+  });
+});
+
 describe("withToolTrace：留痕与 args 裁剪", () => {
   test("成功执行：记一条 tool_calls，字段正确且 artifactPaths 为空数组", async () => {
     const { trace, recordToolCall } = createMockTrace();
@@ -147,6 +175,66 @@ describe("withToolTrace：留痕与 args 裁剪", () => {
     expect(input.artifactPaths).toEqual([]);
     // 非 write/edit/bash：args 原样记录整个 params
     expect(input.args).toEqual({ path: "a.txt" });
+  });
+
+  test("成功执行：记录输出预览（未截断）", async () => {
+    const { trace, recordToolCall } = createMockTrace();
+    const tool = withToolTrace(
+      fakeDefinition("read", async () => ({
+        content: [
+          { type: "text", text: "line-1" },
+          { type: "text", text: "line-2" },
+        ],
+        details: undefined,
+      })),
+      { trace, sessionId: "s1", projectDir },
+    );
+
+    await tool.execute("call-1", { path: "a.txt" } as any, undefined, undefined, undefined as any);
+
+    const input = recordToolCall.mock.calls[0][0];
+    expect(input.outputPreview).toBe("line-1\nline-2");
+    expect(input.outputTruncated).toBe(false);
+  });
+
+  test("输出超过预览上限时截断并标记", async () => {
+    const { trace, recordToolCall } = createMockTrace();
+    const tool = withToolTrace(
+      fakeDefinition("bash", async () => ({
+        content: [{ type: "text", text: "x".repeat(9000) }],
+        details: undefined,
+      })),
+      { trace, sessionId: "s1", projectDir, outputPreviewChars: 100 },
+    );
+
+    await tool.execute(
+      "call-1",
+      { command: "cat big" } as any,
+      undefined,
+      undefined,
+      undefined as any,
+    );
+
+    const input = recordToolCall.mock.calls[0][0];
+    expect(input.outputPreview).toHaveLength(100);
+    expect(input.outputTruncated).toBe(true);
+  });
+
+  test("执行失败：异常信息写入输出预览", async () => {
+    const { trace, recordToolCall } = createMockTrace();
+    const tool = withToolTrace(
+      fakeDefinition("bash", async () => {
+        throw new Error("命令不存在");
+      }),
+      { trace, sessionId: "s1", projectDir },
+    );
+
+    await expect(
+      tool.execute("call-1", { command: "nope" } as any, undefined, undefined, undefined as any),
+    ).rejects.toThrow("命令不存在");
+
+    const input = recordToolCall.mock.calls[0][0];
+    expect(input.outputPreview).toContain("命令不存在");
   });
 
   test("runId / stageId 传函数时，按调用时的最新值留痕（阶段上下文可动态切换）", async () => {

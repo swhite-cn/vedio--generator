@@ -1,7 +1,12 @@
 import type { FastifyInstance } from "fastify";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { VideoForgeError, type RunStatus } from "@videoforge/shared";
 import type { HttpDeps } from "../deps.js";
 import { createAuthPreHandler, requireActor, requireAdmin } from "../auth-hook.js";
+import { buildRunEvents } from "../../trace/run-events.js";
+import { deriveProjectStatus } from "../../domain/project-status.js";
+import { resolveUserProjectDir } from "../../domain/storage-layout.js";
 import { hashPassword } from "../../auth/password.js";
 import { toPublicUser } from "./auth.js";
 import { adminGetRun, adminListRuns } from "../../db/repositories/run-repository.js";
@@ -81,12 +86,27 @@ export function registerAdminRoutes(app: FastifyInstance, deps: HttpDeps): void 
     },
   );
 
-  /** 全站项目列表（只读）。 */
+  /** 全站项目列表（只读，按 `deriveProjectStatus` 推导真实状态）。 */
   app.get("/api/admin/projects", { preHandler: authPreHandler }, async (request, reply) => {
     const actor = requireActor(request);
     requireAdmin(actor);
+    const projects = adminListProjects(deps.db, actor);
+    const runs = adminListRuns(deps.db, actor);
+    const withStatus = projects.map((project) => {
+      const projectRuns = runs.filter((run) => run.project_id === project.id);
+      const projectDir = resolveUserProjectDir(deps.storageRoot, project.user_id, project.name);
+      const finalVideoExists = existsSync(join(projectDir, "final.mp4"));
+      return {
+        ...project,
+        status: deriveProjectStatus({
+          runs: projectRuns,
+          runStages: [],
+          artifacts: { finalVideoExists },
+        }),
+      };
+    });
     reply.code(200);
-    return { projects: adminListProjects(deps.db, actor) };
+    return { projects: withStatus };
   });
 
   /** 全站 run 列表（只读，可按 `status` / `errorCode` 过滤；空字符串参数不入 filter）。 */
@@ -116,9 +136,21 @@ export function registerAdminRoutes(app: FastifyInstance, deps: HttpDeps): void 
     }
 
     const { limit, offset } = parsePaging(request.query);
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    const stageFilter =
+      typeof query.stage === "string" && query.stage.length > 0 ? query.stage : null;
     const stages = adminListRunStages(deps.db, actor, id);
-    const allToolCalls = adminListToolCalls(deps.db, actor, run.session_id, { runId: id });
-    const allLlmCalls = adminListLlmCalls(deps.db, actor, run.session_id, { runId: id });
+    const stageIds = stageFilter
+      ? new Set(stages.filter((row) => row.stage === stageFilter).map((row) => row.id))
+      : null;
+    const rawToolCalls = adminListToolCalls(deps.db, actor, run.session_id, { runId: id });
+    const rawLlmCalls = adminListLlmCalls(deps.db, actor, run.session_id, { runId: id });
+    const allToolCalls = stageIds
+      ? rawToolCalls.filter((call) => call.stage_id && stageIds.has(call.stage_id))
+      : rawToolCalls;
+    const allLlmCalls = stageIds
+      ? rawLlmCalls.filter((call) => call.stage_id && stageIds.has(call.stage_id))
+      : rawLlmCalls;
 
     reply.code(200);
     return {
@@ -128,6 +160,7 @@ export function registerAdminRoutes(app: FastifyInstance, deps: HttpDeps): void 
       llmCalls: allLlmCalls.slice(offset, offset + limit),
       total: { toolCalls: allToolCalls.length, llmCalls: allLlmCalls.length },
       paging: { limit, offset },
+      events: buildRunEvents(run, stages, rawToolCalls, rawLlmCalls),
     };
   });
 }

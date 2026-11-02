@@ -31,7 +31,7 @@ export interface ApiError extends Error {
 export interface ApiRequestOptions {
   /** HTTP 方法，缺省 `GET`。 */
   method?: string;
-  /** 请求体（会被 `JSON.stringify`），缺省不带请求体。 */
+  /** 请求体（普通对象会 JSON 编码；FormData 原样上传），缺省不带请求体。 */
   body?: unknown;
   /** 是否注入 Bearer token，缺省 `true`；登录/注册等公开接口传 `false`。 */
   auth?: boolean;
@@ -114,7 +114,7 @@ export async function apiRequest<T>(path: string, options: ApiRequestOptions = {
   const { method = "GET", body, auth = true } = options;
 
   const headers: Record<string, string> = {};
-  if (body !== undefined) {
+  if (body !== undefined && !(body instanceof FormData)) {
     headers["Content-Type"] = "application/json";
   }
   if (auth) {
@@ -129,7 +129,7 @@ export async function apiRequest<T>(path: string, options: ApiRequestOptions = {
     response = await fetch(`${API_BASE}${path}`, {
       method,
       headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body: body === undefined ? undefined : body instanceof FormData ? body : JSON.stringify(body),
     });
   } catch {
     throw createApiError(NETWORK_ERROR_CODE, NETWORK_ERROR_MESSAGE, 0);

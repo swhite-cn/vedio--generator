@@ -65,6 +65,8 @@ export interface CallArkChatOptions {
 export interface ArkChatResult {
   /** 正文文本。 */
   content: string;
+  /** 思考过程文本（模型返回 `reasoning_content` 时非空；不参与后续请求上下文）。 */
+  reasoning: string;
   /** 聚合后的工具调用列表。 */
   toolCalls: ArkChatToolCall[];
   /** 原始 finish_reason（如 `stop` / `length` / `tool_calls`）。 */
@@ -83,6 +85,7 @@ export interface ArkChatResult {
 /** SSE 解析后的中间结果。 */
 interface ParsedSse {
   content: string;
+  reasoning: string;
   toolCalls: ArkChatToolCall[];
   finishReason: string | null;
   promptTokens: number;
@@ -108,6 +111,7 @@ function headersToRecord(headers: Headers): Record<string, string> {
  */
 function parseSse(raw: string): ParsedSse {
   const contentParts: string[] = [];
+  const reasoningParts: string[] = [];
   const toolCallMap = new Map<number, ArkChatToolCall>();
   let finishReason: string | null = null;
   let promptTokens = 0;
@@ -145,6 +149,12 @@ function parseSse(raw: string): ParsedSse {
 
     const delta = choice.delta && typeof choice.delta === "object" ? choice.delta : {};
     if (typeof delta.content === "string") contentParts.push(delta.content);
+    // 思考过程：Ark 兼容 OpenAI 的推理模型会在 delta 中返回 reasoning_content（部分模型用 reasoning）
+    if (typeof delta.reasoning_content === "string") {
+      reasoningParts.push(delta.reasoning_content);
+    } else if (typeof delta.reasoning === "string") {
+      reasoningParts.push(delta.reasoning);
+    }
 
     for (const rawToolCall of Array.isArray(delta.tool_calls) ? delta.tool_calls : []) {
       const index = typeof rawToolCall.index === "number" ? rawToolCall.index : 0;
@@ -169,6 +179,7 @@ function parseSse(raw: string): ParsedSse {
 
   return {
     content: contentParts.join(""),
+    reasoning: reasoningParts.join(""),
     toolCalls: [...toolCallMap.entries()].sort((a, b) => a[0] - b[0]).map(([, value]) => value),
     finishReason,
     promptTokens,
@@ -192,6 +203,7 @@ function failedResult(
 ): ArkChatResult {
   return {
     content: "",
+    reasoning: "",
     toolCalls: [],
     finishReason: null,
     promptTokens: 0,
@@ -291,6 +303,7 @@ export async function callArkChat(options: CallArkChatOptions): Promise<ArkChatR
     const durationMs = Date.now() - startedAt;
     const responseJson = {
       content: parsed.content,
+      reasoning: parsed.reasoning,
       toolCalls: parsed.toolCalls,
       finishReason: parsed.finishReason,
       usage: { prompt_tokens: parsed.promptTokens, completion_tokens: parsed.completionTokens },
@@ -300,6 +313,7 @@ export async function callArkChat(options: CallArkChatOptions): Promise<ArkChatR
     );
     return {
       content: parsed.content,
+      reasoning: parsed.reasoning,
       toolCalls: parsed.toolCalls,
       finishReason: parsed.finishReason,
       promptTokens: parsed.promptTokens,

@@ -14,6 +14,10 @@ import { createUser } from "../../apps/server/src/db/repositories/user-repositor
 import { createProject } from "../../apps/server/src/db/repositories/project-repository";
 import { createSession } from "../../apps/server/src/db/repositories/session-repository";
 import { createRun, getRun, listRuns } from "../../apps/server/src/db/repositories/run-repository";
+import {
+  createRunStage,
+  updateRunStage,
+} from "../../apps/server/src/db/repositories/run-stage-repository";
 import { recordToolCall } from "../../apps/server/src/db/repositories/trace-repository";
 import { resolveUserProjectDir } from "../../apps/server/src/domain/storage-layout";
 import { createEventBus } from "../../apps/server/src/http/event-bus";
@@ -441,4 +445,117 @@ test("GET /api/media/*：越界 403、缺失 404、本人存在文件 200", asyn
   expect(found.statusCode).toBe(200);
   expect(String(found.headers["content-type"])).toContain("text/plain");
   expect(found.body).toBe("hello-media");
+});
+
+test("POST /api/media/ticket：票据可读媒体、支持 Range 206、无凭据 401", async () => {
+  const { app } = await buildTestApp();
+  const userA = seedUser("ua");
+  const { actor, project } = seedProject(userA, "proj-media-ticket");
+  const tokenA = signAccessToken(app, userA);
+  const base = `users/${actor.userId}/projects/${project.name}`;
+
+  const projectDir = resolveUserProjectDir(directory, actor.userId, project.name);
+  mkdirSync(projectDir, { recursive: true });
+  writeFileSync(join(projectDir, "clip.mp4"), "0123456789", "utf-8");
+
+  // 签发媒体票据（原生 img/video 标签无法带 Authorization，改用它）
+  const ticketRes = await app.inject({
+    method: "POST",
+    url: "/api/media/ticket",
+    headers: { authorization: `Bearer ${tokenA}` },
+  });
+  expect(ticketRes.statusCode).toBe(200);
+  const ticket = ticketRes.json().ticket as string;
+  expect(typeof ticket).toBe("string");
+  expect(ticket.length).toBeGreaterThan(0);
+
+  const viaTicket = await app.inject({
+    method: "GET",
+    url: `/api/media/${base}/clip.mp4?ticket=${encodeURIComponent(ticket)}`,
+  });
+  expect(viaTicket.statusCode).toBe(200);
+  expect(viaTicket.body).toBe("0123456789");
+  expect(String(viaTicket.headers["accept-ranges"])).toBe("bytes");
+
+  // 场景文件在工作台预览模式下从暂停时间轴自动开始；原始文件不被改写。
+  mkdirSync(join(projectDir, "scenes"), { recursive: true });
+  writeFileSync(
+    join(projectDir, "scenes", "s1.html"),
+    "<html><body><script>window.__videoforgeTimeline={restart:function(){}};</script></body></html>",
+    "utf-8",
+  );
+  const scenePreview = await app.inject({
+    method: "GET",
+    url: `/api/media/${base}/scenes/s1.html?ticket=${encodeURIComponent(ticket)}&preview=1`,
+  });
+  expect(scenePreview.statusCode).toBe(200);
+  expect(scenePreview.body).toContain("timeline.restart()");
+  expect(scenePreview.body).toContain("</body>");
+
+  // 视频播放依赖 Range/206
+  const ranged = await app.inject({
+    method: "GET",
+    url: `/api/media/${base}/clip.mp4?ticket=${encodeURIComponent(ticket)}`,
+    headers: { range: "bytes=2-5" },
+  });
+  expect(ranged.statusCode).toBe(206);
+  expect(String(ranged.headers["content-range"])).toBe("bytes 2-5/10");
+  expect(ranged.rawPayload.toString()).toBe("2345");
+
+  // 无任何凭据仍拒绝
+  const anonymous = await app.inject({ method: "GET", url: `/api/media/${base}/clip.mp4` });
+  expect(anonymous.statusCode).toBe(401);
+  expect(anonymous.json()).toMatchObject({ error: { code: "AUTH_INVALID" } });
+
+  // 票据不能当作 access token 访问其它接口（用途隔离）
+  const isolated = await app.inject({
+    method: "GET",
+    url: `/api/projects/${project.id}/runs`,
+    headers: { authorization: `Bearer ${ticket}` },
+  });
+  expect(isolated.statusCode).toBe(401);
+});
+
+test("GET /api/runs/:id：阶段产物已存在时把失败阶段校正为已完成", async () => {
+  const { app } = await buildTestApp();
+  const userA = seedUser("ua");
+  const { actor, project, session } = seedProject(userA, "proj-reconcile");
+  const tokenA = signAccessToken(app, userA);
+
+  // 复现现场：run 以 failed 收场，tts 阶段记录 ARTIFACT_MISSING，
+  // 但用户随后在对话里补跑并生成了音频（自由对话不写 run_stages）
+  const run = createRun(database.db, actor, {
+    projectId: project.id,
+    sessionId: session.id,
+    trigger: "user",
+    status: "failed",
+  });
+  const stage = createRunStage(database.db, actor, {
+    runId: run.id,
+    stage: "tts",
+    attempt: 0,
+    status: "failed",
+  });
+  updateRunStage(database.db, actor, stage.id, {
+    status: "failed",
+    errorCode: "ARTIFACT_MISSING",
+  });
+
+  const projectDir = resolveUserProjectDir(directory, actor.userId, project.name);
+  mkdirSync(join(projectDir, "audio"), { recursive: true });
+  writeFileSync(join(projectDir, "audio", "s1.mp3"), "fake-mp3");
+
+  const res = await app.inject({
+    method: "GET",
+    url: `/api/runs/${run.id}`,
+    headers: { authorization: `Bearer ${tokenA}` },
+  });
+  expect(res.statusCode).toBe(200);
+  const tts = (
+    res.json().stages as Array<{ stage: string; status: string; error_code: string | null }>
+  ).find((row) => row.stage === "tts");
+  expect(tts?.status).toBe("done");
+  expect(tts?.error_code).toBeNull();
+  // 只做视图校正：数据库里的原始失败结论保持不变（追加式审计）
+  expect(getRun(database.db, actor, run.id)?.status).toBe("failed");
 });

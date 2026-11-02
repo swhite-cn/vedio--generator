@@ -17,6 +17,7 @@ import {
 import { createSession, listSessions } from "../../db/repositories/session-repository.js";
 import { createRun, listRuns } from "../../db/repositories/run-repository.js";
 import { listRunStages } from "../../db/repositories/run-stage-repository.js";
+import { syncGeneratedProjectAssets } from "../../domain/project-assets.js";
 
 /**
  * 项目与会话（项目维度）路由（见设计文档 §4.2、§8.3、§8.4）。
@@ -151,6 +152,7 @@ export function registerProjectRoutes(app: FastifyInstance, deps: HttpDeps): voi
     const artifacts: ArtifactIndex = capability
       ? buildArtifactIndex(projectDir, capability, project.profile)
       : { finalVideoExists: false, entries: [] };
+    syncGeneratedProjectAssets(deps.db, actor, project, artifacts);
 
     reply.code(200);
     return { project: { ...project, status }, artifacts };

@@ -9,6 +9,7 @@ export * from "./env.js";
 export * from "./ark-client.js";
 export * from "./media.js";
 export * from "./copy-contract.js";
+export * from "./manifest.js";
 export * from "./copy-generate.js";
 export * from "./image-generate.js";
 export * from "./scene-generate.js";

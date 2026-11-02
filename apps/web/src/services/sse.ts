@@ -22,6 +22,7 @@ const RECONNECT_DELAY_MS = 2_000;
  */
 const NAMED_EVENT_TYPES = [
   "text_delta",
+  "thinking_delta",
   "tool_start",
   "tool_end",
   "turn_end",

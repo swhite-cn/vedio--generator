@@ -25,6 +25,8 @@ function toToolCall(row: any): ToolCall {
     error_code: row.errorCode ?? null,
     duration_ms: row.durationMs,
     artifact_paths: row.artifactPaths ? (JSON.parse(row.artifactPaths) as string[]) : [],
+    output_preview: row.outputPreview ?? null,
+    output_truncated: Boolean(row.outputTruncated),
     created_at: row.createdAt,
   };
 }
@@ -59,6 +61,10 @@ export interface RecordToolCallInput {
   errorCode?: string | null;
   durationMs: number;
   artifactPaths?: string[];
+  /** 工具输出预览（调用方需在写入前截断并脱敏）。 */
+  outputPreview?: string | null;
+  /** 输出是否被截断。 */
+  outputTruncated?: boolean;
 }
 
 /**
@@ -85,6 +91,8 @@ export function recordToolCall(db: any, actor: Actor, input: RecordToolCallInput
     errorCode: input.errorCode ?? null,
     durationMs: input.durationMs,
     artifactPaths: JSON.stringify(input.artifactPaths ?? []),
+    outputPreview: input.outputPreview ?? null,
+    outputTruncated: input.outputTruncated ?? false,
     createdAt: new Date().toISOString(),
   };
   db.insert(toolCalls).values(row).run();

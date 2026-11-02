@@ -14,6 +14,7 @@ import { arkChatCompletion } from "./ark-client.js";
 import { readCopyDoc, writeCopyDoc } from "./copy-contract.js";
 import { loadSystemConfig, type SystemConfig } from "./config.js";
 import { getArkApiKey } from "./env.js";
+import { appendGenerationRecord, resolveSceneScope } from "./manifest.js";
 import { loadPromptSet, renderTemplate, type PromptSet } from "./prompts.js";
 
 /** 加载系统配置与 Ark 凭据；配置非法或密钥缺失时由底层抛错（不记录密钥） */
@@ -112,6 +113,8 @@ async function mapWithConcurrency<T, R>(
  * @param options.concurrency 限并发度（CLI 层已取默认 3）
  * @param options.outFile 回填后的 copy.json 输出路径；缺省原地覆盖 copyPath
  * @param options.runId 运行 ID（--run-id）；缺省用 copy.json 所在目录名
+ * @param options.sceneIds 只重生成这些场景；缺省为全部场景
+ * @param options.promptOverride 单场景额外要求（仅允许配合单个 sceneId 使用）
  * @returns 各场景 HTML 路径与降级场景 ID 列表（供调用方拼装 stdout JSON）
  */
 export async function generateScenes(options: {
@@ -123,7 +126,9 @@ export async function generateScenes(options: {
   concurrency: number;
   outFile?: string;
   runId?: string;
-}): Promise<{ scenes: Array<string | undefined>; fallbacks: string[] }> {
+  sceneIds?: string[];
+  promptOverride?: string;
+}): Promise<{ scenes: Array<string | undefined>; fallbacks: string[]; generated: string[] }> {
   const doc = readCopyDoc(options.copyPath);
   const { config, apiKey, ark } = loadArk(options.rootDir);
   if (ark.chat_model === "PLEASE_FILL_CHAT_MODEL_ID") {
@@ -146,18 +151,43 @@ export async function generateScenes(options: {
   mkdirSync(scenesDir, { recursive: true });
   const onlyFallbacks = options.onlyFallbacks;
   const concurrency = options.concurrency;
+  // 定向重生成：只处理显式指定的场景，避免"改一个场景导致全部重画"
+  const scope = resolveSceneScope(
+    doc.scenes.map((scene) => scene.sceneId),
+    options.sceneIds,
+  );
+  if (options.promptOverride !== undefined && scope.length !== 1) {
+    throw new VideoForgeError(
+      "CONFIG_INVALID",
+      "promptOverride 只能配合单个 sceneId 使用，避免同一要求覆盖多个场景",
+    );
+  }
+  const scopeSet = new Set(scope);
   // 断点续跑：仅挑选 html 缺失或文件头带降级标记的场景重新生成
   const pending = doc.scenes.filter((scene) => {
+    if (!scopeSet.has(scene.sceneId)) return false;
     if (!onlyFallbacks) return true;
     const htmlPath = scene.htmlPath ?? join(scenesDir, `${scene.sceneId}.html`);
     if (!existsSync(htmlPath)) return true;
     return readFileSync(htmlPath, "utf-8").includes(FALLBACK_MARKER);
   });
   const fallbacks: string[] = [];
+  const generated: string[] = [];
   await mapWithConcurrency(pending, concurrency, async (scene) => {
     const imageRelPath = scene.imagePath ? `../images/${basename(scene.imagePath)}` : undefined;
+    // 用户级精确要求只在单场景定向重生成时追加，避免污染其余场景
+    const userContent = [
+      `场景标题：${scene.title}`,
+      `口播文案：${scene.narration}`,
+      `画幅：${spec.width}x${spec.height}`,
+      `底图相对路径（可作为 <img> 的 src 直接引用）：${imageRelPath ?? "无（请用渐变背景）"}`,
+      ...(options.promptOverride ? [`额外要求：${options.promptOverride}`] : []),
+    ].join("\n");
+    const prompt = `${sceneSystemPrompt}\n\n---\n\n${userContent}`;
+    const startedAt = Date.now();
     let code: SceneCode;
     let fallback = false;
+    let failure: unknown;
     try {
       const text = await arkChatWithRetry({
         baseUrl: ark.base_url,
@@ -165,20 +195,13 @@ export async function generateScenes(options: {
         model: ark.chat_model,
         messages: [
           { role: "system", content: sceneSystemPrompt },
-          {
-            role: "user",
-            content: [
-              `场景标题：${scene.title}`,
-              `口播文案：${scene.narration}`,
-              `画幅：${spec.width}x${spec.height}`,
-              `底图相对路径（可作为 <img> 的 src 直接引用）：${imageRelPath ?? "无（请用渐变背景）"}`,
-            ].join("\n"),
-          },
+          { role: "user", content: userContent },
         ],
       });
       code = parseSceneCodeJson(text);
     } catch (err) {
       fallback = true;
+      failure = err;
       console.info(
         `[scene:gen] 场景 ${scene.sceneId} 模型输出不可用，降级内置动画：${(err as Error).message}`,
       );
@@ -193,8 +216,33 @@ export async function generateScenes(options: {
     // 降级产物写入文件头标记，供 --only-fallbacks 续跑时识别
     writeFileSync(htmlPath, (fallback ? FALLBACK_MARKER + "\n" : "") + html, "utf-8");
     scene.htmlPath = htmlPath;
+    generated.push(scene.sceneId);
+    appendGenerationRecord(workDir, {
+      runId: options.runId,
+      stage: "scene",
+      sceneId: scene.sceneId,
+      assetPath: `scenes/${scene.sceneId}.html`,
+      model: ark.chat_model,
+      promptSet: prompts.name,
+      prompt,
+      params: {
+        width: spec.width,
+        height: spec.height,
+        overridden: options.promptOverride !== undefined,
+      },
+      templateSnapshot: { "scene-system.txt": prompts.sceneSystem },
+      ok: true,
+      fallback,
+      ...(failure
+        ? {
+            errorCode: failure instanceof VideoForgeError ? failure.code : "ADAPTER_FAILED",
+            errorMessage: failure instanceof Error ? failure.message : String(failure),
+          }
+        : {}),
+      durationMs: Date.now() - startedAt,
+    });
   });
   fallbacks.sort();
   writeCopyDoc(options.outFile ?? options.copyPath, doc);
-  return { scenes: doc.scenes.map((s) => s.htmlPath), fallbacks };
+  return { scenes: doc.scenes.map((s) => s.htmlPath), fallbacks, generated };
 }

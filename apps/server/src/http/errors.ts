@@ -29,6 +29,19 @@ export const ERROR_STATUS: Readonly<Record<VideoForgeErrorCode, number>> = {
   // 以下两者文档未列，按内核失败归 500。
   QUALITY_BLOCKED: 500,
   EVENT_IMMUTABLE: 500,
+  // 工具层防护码：正常路径下在 agent 工具执行内被捕获、作为工具结果回给模型，不会冒泡到 HTTP；
+  // 这里给出语义更贴切的兜底映射——命令被护栏拒绝视为策略禁止（403），
+  // 相同调用连续失败熔断视为触发限流（429）。
+  TOOL_COMMAND_BLOCKED: 403,
+  TOOL_CIRCUIT_OPEN: 429,
+  // 项目资产：类型、容量和请求参数非法均属于客户端输入错误。
+  ASSET_TYPE_UNSUPPORTED: 400,
+  ASSET_TOO_LARGE: 400,
+  ASSET_INVALID: 400,
+  ASSET_NOT_FOUND: 404,
+  // Agent 高影响动作的确认状态冲突。
+  ACTION_CONFIRMATION_REQUIRED: 409,
+  ACTION_NOT_CONFIRMABLE: 409,
 };
 
 /**

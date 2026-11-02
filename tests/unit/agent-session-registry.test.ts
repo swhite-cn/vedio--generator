@@ -16,7 +16,10 @@ import {
 } from "../../apps/server/src/agent/session-registry";
 import type { TraceStore } from "../../apps/server/src/trace/trace-store";
 import { createDatabase, migrateDatabase } from "../../apps/server/src/db";
-import { appendMessage } from "../../apps/server/src/db/repositories/message-repository";
+import {
+  appendMessage,
+  listMessages,
+} from "../../apps/server/src/db/repositories/message-repository";
 import { createProject } from "../../apps/server/src/db/repositories/project-repository";
 import { createSession } from "../../apps/server/src/db/repositories/session-repository";
 import { resolveUserProjectDir } from "../../apps/server/src/domain/storage-layout";
@@ -57,11 +60,20 @@ let config: SystemConfig;
 /** 可控时钟（毫秒），供空闲回收测试推进。 */
 let clock: number;
 
-/** 构造最小配置（注册表只用 runtime.max_concurrent_stage 与 agent.allow_shell_write_edit）。 */
+/**
+ * 构造最小配置（注册表只用 runtime.max_concurrent_stage、agent.allow_shell_write_edit、
+ * agent.show_thinking、agent.tool_output_preview_chars，以及内置工具的护栏 / 熔断两项）。
+ */
 function makeConfig(allowShellWriteEdit: boolean): SystemConfig {
   return {
     runtime: { max_concurrent_stage: 1 },
-    agent: { allow_shell_write_edit: allowShellWriteEdit },
+    agent: {
+      allow_shell_write_edit: allowShellWriteEdit,
+      show_thinking: true,
+      tool_output_preview_chars: 8192,
+      tool_failure_circuit_breaker: 3,
+      command_guardrails: [],
+    },
   } as unknown as SystemConfig;
 }
 
@@ -302,6 +314,75 @@ describe("createSessionRegistry：会话创建与上下文装配", () => {
     expect(names).not.toContain("bash");
     expect(names).not.toContain("write");
     expect(names).not.toContain("edit");
+  });
+});
+
+describe("createSessionRegistry：思考过程门控（agent.show_thinking）", () => {
+  /** assistant 完成消息：含 thinking 块与正文块。 */
+  const assistantWithThinking = {
+    type: "message_end",
+    message: {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "推理过程" },
+        { type: "text", text: "结论" },
+      ],
+    },
+  };
+
+  test("show_thinking=true：thinking_delta 正常转发，落库保留 thinking 块", async () => {
+    const fake = createFakePort();
+    const received: string[] = [];
+    const registry = makeRegistry(fake.port, {
+      onSessionEvent: (_sid, event) =>
+        received.push(String((event as any)?.assistantMessageEvent?.type ?? event?.type)),
+    });
+    await registry.getOrCreate(userA, sessionId);
+    const session = fake.sessions[0]!;
+
+    session.emit({
+      type: "message_update",
+      assistantMessageEvent: { type: "thinking_delta", delta: "推理" },
+    });
+    expect(received).toContain("thinking_delta");
+
+    session.emit(assistantWithThinking);
+    const stored = listMessages(database.db, userA, sessionId).at(-1)!;
+    const content = (stored.payload as { content: Array<{ type: string }> }).content;
+    expect(content.some((part) => part.type === "thinking")).toBe(true);
+  });
+
+  test("show_thinking=false：不转发 thinking_delta，落库剥离 thinking 块（正文不受影响）", async () => {
+    const fake = createFakePort();
+    const received: string[] = [];
+    const disabled = makeConfig(true);
+    disabled.agent.show_thinking = false;
+    const registry = makeRegistry(fake.port, {
+      config: disabled,
+      onSessionEvent: (_sid, event) =>
+        received.push(String((event as any)?.assistantMessageEvent?.type ?? event?.type)),
+    });
+    await registry.getOrCreate(userA, sessionId);
+    const session = fake.sessions[0]!;
+
+    session.emit({
+      type: "message_update",
+      assistantMessageEvent: { type: "thinking_delta", delta: "推理" },
+    });
+    expect(received).toHaveLength(0);
+
+    // 正文增量与工具事件不 gate
+    session.emit({
+      type: "message_update",
+      assistantMessageEvent: { type: "text_delta", delta: "正文" },
+    });
+    expect(received).toEqual(["text_delta"]);
+
+    session.emit(assistantWithThinking);
+    const stored = listMessages(database.db, userA, sessionId).at(-1)!;
+    const content = (stored.payload as { content: Array<{ type: string }> }).content;
+    expect(content.some((part) => part.type === "thinking")).toBe(false);
+    expect(content.some((part) => part.type === "text")).toBe(true);
   });
 });
 

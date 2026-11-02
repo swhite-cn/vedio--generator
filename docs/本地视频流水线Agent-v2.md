@@ -264,15 +264,19 @@ videoforge/
 
 统一形制 `VideoForgeError(code, message)`：HTTP 错误响应体为 `{error: {code, message}}`，SSE 经 `error` 事件透传，CLI 原样输出到 stdout JSON，阶段工具透传为 `tool_end.errorCode`（见 5.4）。本方案涉及的错误码：
 
-| 错误码                                                             | HTTP | 含义                                                                  |
-| ------------------------------------------------------------------ | ---- | --------------------------------------------------------------------- |
-| `AUTH_INVALID`                                                     | 401  | 令牌缺失 / 过期 / 签名不符（见 8.1）                                  |
-| `AUTH_FORBIDDEN`                                                   | 403  | 无权限、越权访问、注册关闭、保留用户名（见 8.3）                      |
-| `PROJECT_BUSY`                                                     | 409  | 项目已有活跃 run，租约冲突（见 8.4）                                  |
-| `RUN_STATE_INVALID`                                                | 409  | 非法 run 状态流转，如对 `done` 的 run 调 `resume`（见 6.2）           |
-| `CONFIG_INVALID`                                                   | 400  | 配置或参数非法；启动期校验失败则拒绝启动，无 HTTP 语义（见 8.1、5.4） |
-| `TOOL_UNAVAILABLE` / `ADAPTER_FAILED` / `ADAPTER_PROTOCOL_INVALID` | 500  | 内核外部进程 / 网络 / 协议失败，由阶段工具原样透传（见 5.4）          |
+| 错误码                                                             | HTTP | 含义                                                                    |
+| ------------------------------------------------------------------ | ---- | ----------------------------------------------------------------------- |
+| `AUTH_INVALID`                                                     | 401  | 令牌缺失 / 过期 / 签名不符（见 8.1）                                    |
+| `AUTH_FORBIDDEN`                                                   | 403  | 无权限、越权访问、注册关闭、保留用户名（见 8.3）                        |
+| `PROJECT_BUSY`                                                     | 409  | 项目已有活跃 run，租约冲突（见 8.4）                                    |
+| `RUN_STATE_INVALID`                                                | 409  | 非法 run 状态流转，如对 `done` 的 run 调 `resume`（见 6.2）             |
+| `CONFIG_INVALID`                                                   | 400  | 配置或参数非法；启动期校验失败则拒绝启动，无 HTTP 语义（见 8.1、5.4）   |
+| `TOOL_UNAVAILABLE` / `ADAPTER_FAILED` / `ADAPTER_PROTOCOL_INVALID` | 500  | 内核外部进程 / 网络 / 协议失败，由阶段工具原样透传（见 5.4）            |
+| `TOOL_COMMAND_BLOCKED`                                             | 403  | bash 命令被配置护栏（`agent.command_guardrails`）拒绝（见 5.4、14.6）   |
+| `TOOL_CIRCUIT_OPEN`                                                | 429  | 相同（工具 + 参数）连续失败达阈值被硬熔断，拒绝重复调用（见 5.4、14.6） |
 
+- 后两个是**工具层防护码**：正常在 agent 工具执行内被捕获、作为工具结果回给模型，不外冒到 HTTP；HTTP 列仅为语义兜底（策略禁止 / 触发限流）。
+- 两个防护码同受脱敏与留痕约束：拒绝 / 熔断都会留下 `tool_end.ok=false` 记录（见 5.4）。
 - `INTERRUPTED` 不是 API 错误码，仅作为 `runs.error_code` 值标记进程重启导致的中断（见 6.5）。
 - 原双进程方案的 `HARNESS_UNAVAILABLE` 随单进程化移除，不再存在（见 3.1）。
 
@@ -285,7 +289,7 @@ videoforge/
 - **进程内常驻**：`Map<sessionId, { session: AgentSession, userId, projectId, projectDir }>`。
 - **会话内串行**：由 Pi 的消息队列保证（`steer` / `followUp` 语义沿用）。
 - **会话间并行**：不同会话可同时运行；**同一项目同一时刻只允许一个活跃 run**（租约见 8.4）。
-- **阶段工具内部限并发**：全局信号量，上限由 `runtime.max_concurrent_stage` 控制（默认 1，避免 ffmpeg / Chromium 争抢资源）。
+- **阶段工具内部限并发**：全局信号量，上限由 `runtime.max_concurrent_stage` 控制（默认 1，避免 ffmpeg / Chromium 争抢资源）；场景生成（scene 阶段）是逐场景调 Ark 的纯网络 IO，单独由 `runtime.scene_concurrency` 控制（默认 3，范围 1-8），不受全局上限约束。
 - **单进程防护**：工具 handler 全部 `try/catch` 兜底为 `tool_end.ok=false`（异常不冒泡拖垮进程）；渲染/合成阶段设超时（代码常量，不进配置），超时按 `TOOL_UNAVAILABLE` 收尾。
 
 ### 5.2 会话生命周期
@@ -312,23 +316,33 @@ videoforge/
 
 **7 个自定义阶段工具**（TypeBox schema 定义，handler 直接调用内核，不 spawn 子进程）：
 
-| 工具                  | 参数                           | 产出                             |
-| --------------------- | ------------------------------ | -------------------------------- |
-| `copy_generate`       | `topic`, `style`, `promptSet?` | `copy.json`                      |
-| `image_generate`      | `{}`                           | `images/<sceneId>.png`           |
-| `scene_generate`      | `{}`                           | `scenes/<sceneId>.html`          |
-| `tts_generate`        | `speaker?`                     | `audio/<sceneId>.mp3`            |
-| `storyboard_generate` | `{}`                           | `timeline.json`                  |
-| `render_frames`       | `profile`                      | `build/render/<profile>/frames/` |
-| `compose_video`       | `profile`                      | `final.mp4`                      |
+| 工具                  | 参数                                                   | 产出                             |
+| --------------------- | ------------------------------------------------------ | -------------------------------- |
+| `copy_generate`       | `topic`, `style`, `promptSet?`                         | `copy.json`                      |
+| `image_generate`      | `sceneIds?`, `promptOverride?`, `promptSet?`, `mode?`  | `images/<sceneId>.png`           |
+| `scene_generate`      | `sceneIds?`, `promptOverride?`, `promptSet?`           | `scenes/<sceneId>.html`          |
+| `tts_generate`        | `sceneIds?`                                            | `audio/<sceneId>.mp3`            |
+| `storyboard_generate` | `{}`                                                   | `timeline.json`                  |
+| `render_frames`       | `profile`                                              | `build/render/<profile>/frames/` |
+| `compose_video`       | `profile`                                              | `final.mp4`                      |
 
 `profile` 取值限定为 `config/profiles/` 下已存在的输出 Profile 名（当前为 `landscape-1080p` 与 `portrait-1080p`），非法值一律返回 `CONFIG_INVALID`。工作流引擎下发指令时从 `projects.profile` 注入该参数（见 6.3）。
+
+**定向重生成**：`sceneIds` 缺省表示整批重做（保持原行为），传入时只处理列出的分镜，未列出的分镜产物保持不动；`promptOverride` 仅允许与单个 `sceneId` 同用，多场景搭配直接返回 `CONFIG_INVALID`；`mode: "missing"` 只补缺失产物。图像被覆盖前会归档到 `images/history/<sceneId>-<timestamp>.png`。每次生成（含失败与降级）都追加一条记录到项目的 `manifest/generations.jsonl`，字段与用途见 7.6。
 
 **路径与安全边界**：
 
 - 7 个阶段工具的参数中**不含任何路径**，项目目录由运行时从会话上下文注入，落盘路径统一走 `packages/pipeline/path-safety.ts` → 阶段工具本身无法越界。
 - `bash` / `write` / `edit` 默认放开后，agent 具备任意读写能力，**越界防护不再由工具签名保证**。当前缓解手段：进程 `cwd` 固定为项目目录、服务仅监听 `127.0.0.1`、用户数据按 `userId` 分目录、必要时用 `agent.allow_shell_write_edit: false` 一键收紧。
+- **Windows 保留设备名收敛**：`path-safety.ts` 统一拒绝 `CON` / `PRN` / `AUX` / `NUL` / `COM1-9` / `LPT1-9`（含带扩展名与大小写变体），同时作用于工件路径与项目名（目录名），返回 `PATH_OUTSIDE_STORAGE`。这是"边界兜底"：即便上游产生脏文件名，也无法落盘。
 - **所有工具调用（含 `bash` / `write` / `edit`）都写入 `tool_calls`**，命令原文、退出码与耗时一并留痕，保证审计链完整（见 7.3）。
+
+**两层工具防护**（接在内置工具上，见 14.6）：
+
+- **命令护栏（L1，仅 `bash`）**：执行前按配置 `agent.command_guardrails` 规则集预检命令原文。`reject` 规则命中即抛 `TOOL_COMMAND_BLOCKED`；`rewrite` 规则把匹配片段替换为字面量后继续执行（用函数式替换，规避捕获组歧义）。规则是**配置数据而非代码黑名单**——新增一类要拦的命令写法只需追加一条 YAML。典型：把 cmd 风格的 `2>nul` 改写为 `2>/dev/null`，避免在 Windows 上落盘名为 `nul` 的文件而拖垮后续 `grep` / `find`。
+- **重复失败熔断（L3）**：以 `工具名 + 稳定序列化后的参数` 为签名计数，连续失败（异常或 `isError` 结果）达 `agent.tool_failure_circuit_breaker` 次后，**完全相同的调用不再执行本体**，直接抛 `TOOL_CIRCUIT_OPEN`，强制模型换参数或换思路；成功一次即清零该签名。阈值 `<= 0` 关闭熔断。
+- 包装层次（由内到外）：命令护栏（仅 bash）→ 重复失败熔断 → 工具调用留痕，保证拒绝 / 熔断同样落痕。
+- 熔断状态按**会话**维护（`createAgentTools` 每会话调用一次），不跨会话串味。
 
 **错误映射**：内核抛出的 `VideoForgeError(code, message)` 原样作为 `tool_end.errorCode` 回传，agent 可据此按 SKILL.md 的失败排查段落自救或转告用户。
 
@@ -346,9 +360,10 @@ videoforge/
 
 1. 角色：视频流水线操作员，面向科普/历史短视频。
 2. 工作目录约定：产物布局、`final.mp4` 命名要求。
-3. **引擎纪律**：阶段顺序与推进由工作流引擎决定；收到阶段指令时只执行该阶段、只调用对应阶段工具；不自行跳阶段、不盲跑全链路。
-4. 输出纪律：不向用户复述密钥；失败时给出错误码与下一步建议。
-5. **行为边界**：只在当前项目内写入；不修改仓库源码与配置文件；不读取或回显 `.env.local` 内容；不删除项目以外的任何文件。
+3. **运行环境（L0 层防御）**：声明运行在 Windows 本机、命令由 bash（POSIX shell）执行，给出方言惯用法——丢弃输出用 `2>/dev/null` 而非 cmd 风格的 `2>nul`、查找可执行文件用 `command -v` 而非 `where`、路径用正斜杠且含中文/空格要加引号。治"这一类"方言错误，零代码、最通用。
+4. **引擎纪律**：阶段顺序与推进由工作流引擎决定；收到阶段指令时只执行该阶段、只调用对应阶段工具；不自行跳阶段、不盲跑全链路。
+5. 输出纪律：不向用户复述密钥；失败时给出错误码与下一步建议。
+6. **行为边界**：只在当前项目内写入；不修改仓库源码与配置文件；不读取或回显 `.env.local` 内容；不删除项目以外的任何文件。
 
 ---
 
@@ -455,6 +470,15 @@ run（一次任务运行，见 runs 表）
 5. token 消耗与项目产出的关系（成本核算）。
 
 实施时不得为满足短期需求删改上述字段；新增字段保持追加式。
+
+### 7.6 生成清单（manifest）
+
+四条生成阶段（`copy` / `image` / `scene` / `tts`）的模型调用不经过 Pi provider，因此 `llm_calls` 无法自动覆盖它们。为此在**项目目录内**追加写 `manifest/generations.jsonl`（每行一条 `GenerationRecord`），记录：`stage`、`sceneId`、`assetPath`、`model`、`promptSet`、`prompt` 全文、`promptSha256`、`params`、`templateSnapshot`、`ok` / `errorCode` / `fallback`、`durationMs`、`supersedesId`（同一 stage + sceneId 的版本链）、`createdAt`。
+
+- **定位**：manifest 是"还原当时生成上下文"的权威来源，随项目走，删库不丢；`llm_calls` 仅作镜像，供统一检索。
+- **镜像**：server 侧 `trace/generation-mirror.ts` 在阶段工具结束后对比 `createdAt >= 本次调用开始时间`，把新增记录镜像进 `llm_calls`（`ok: record.ok && !record.fallback`）。pipeline 层因此不依赖数据库。
+- **写入约束**：追加式、不覆盖；写盘失败只告警不中断生成；图像只记元数据，不落 base64。
+- **对外读取**：`GET /api/projects/:id/generations` 返回每个 `stage + sceneId` 的最新记录，供产物面板展示"生成信息"。
 
 ---
 
@@ -626,16 +650,21 @@ SQLite + Drizzle，schema 重建（旧的 Build 领域表全部删除）。
 
 ### 12.1 新增
 
-| 配置项                         | 默认值                      | 说明                                                                                                                              |
-| ------------------------------ | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `server.jwt_secret_env`        | `JWT_SECRET`                | JWT 密钥所在的环境变量名；密钥不得写入 YAML                                                                                       |
-| `server.access_token_ttl`      | `12h`                       | 令牌有效期                                                                                                                        |
-| `server.allow_registration`    | `true`                      | 是否开放自助注册；关闭后仅能由 `cli db:user --create` 建号                                                                        |
-| `server.admin_password_env`    | `VF_ADMIN_INITIAL_PASSWORD` | admin 初始密码所在的环境变量名；变量未设置时回退内置默认值 `mongoose-admin`；仅首次创建 admin 时读取一次；属敏感值，不得写入 YAML |
-| `server.max_projects_per_user` | `50`                        | 单用户项目数量上限（1-1000）；超限返回 `CONFIG_INVALID`                                                                           |
-| `agent.allow_shell_write_edit` | `true`                      | 是否向 agent 放开 `bash` / `write` / `edit`；默认放开，安全性依赖审计留痕与提示词约束，见 5.4 与 14.6                             |
-| `workflow.max_stage_retry`     | `2`                         | 阶段失败后 agent 自救重试上限（0-5）；超限 run 置 `failed`                                                                        |
-| `runtime.max_concurrent_stage` | `1`                         | 阶段工具全局并发上限；默认 1 避免 ffmpeg/Chromium 争抢                                                                            |
+| 配置项                               | 默认值                      | 说明                                                                                                                                          |
+| ------------------------------------ | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `server.jwt_secret_env`              | `JWT_SECRET`                | JWT 密钥所在的环境变量名；密钥不得写入 YAML                                                                                                   |
+| `server.access_token_ttl`            | `12h`                       | 令牌有效期                                                                                                                                    |
+| `server.allow_registration`          | `true`                      | 是否开放自助注册；关闭后仅能由 `cli db:user --create` 建号                                                                                    |
+| `server.admin_password_env`          | `VF_ADMIN_INITIAL_PASSWORD` | admin 初始密码所在的环境变量名；变量未设置时回退内置默认值 `mongoose-admin`；仅首次创建 admin 时读取一次；属敏感值，不得写入 YAML             |
+| `server.max_projects_per_user`       | `50`                        | 单用户项目数量上限（1-1000）；超限返回 `CONFIG_INVALID`                                                                                       |
+| `agent.allow_shell_write_edit`       | `true`                      | 是否向 agent 放开 `bash` / `write` / `edit`；默认放开，安全性依赖审计留痕与提示词约束，见 5.4 与 14.6                                         |
+| `agent.show_thinking`                | `true`                      | 是否向 Web 推送并持久化模型思考过程（Ark `reasoning_content`）；关闭后对话流与历史回放都不含思考内容                                          |
+| `agent.tool_output_preview_chars`    | `8192`                      | 工具输出预览字符上限（256-65536）；超出截断并标注，工具输出全文不落库                                                                         |
+| `agent.tool_failure_circuit_breaker` | `3`                         | 相同（工具 + 参数）连续失败达此次数后硬熔断（0-20）；0 表示关闭；熔断后相同调用直接返回 `TOOL_CIRCUIT_OPEN`                                   |
+| `agent.command_guardrails`           | 见 `config/default.yaml`    | bash 命令预检护栏规则列表（`id` / `pattern` / `flags` / `action` / `replacement` / `hint`）；空列表关闭护栏；规则是配置数据，新增防护不改代码 |
+| `workflow.max_stage_retry`           | `2`                         | 阶段失败后 agent 自救重试上限（0-5）；超限 run 置 `failed`                                                                                    |
+| `runtime.max_concurrent_stage`       | `1`                         | 阶段工具全局并发上限；默认 1 避免 ffmpeg/Chromium 争抢                                                                                        |
+| `runtime.scene_concurrency`          | `3`                         | 场景生成（scene 阶段）内部并发度（1-8）；纯网络 IO，与 `max_concurrent_stage` 解耦，取值过大可能触发 Ark 限流                                 |
 
 ### 12.2 删除
 
@@ -680,17 +709,18 @@ YAML 每个叶子字段必须带用途注释，注明单位/范围、空值默�
 
 ## 14. 风险与待验证项
 
-| 编号 | 风险                                                                                               | 应对                                                                                                                                                                                 |
-| ---- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 14.1 | Pi 的 provider 注册机制与 Ark Agent Plan 端点兼容性未知                                            | 实施首日先做最小连通性验证；不兼容则改用 `ModelRegistry.find` + 自定义 provider（自实现 provider 同时承担 7.2 的埋点）                                                               |
-| 14.2 | 单进程后 agent 运行时异常可能拖垮 server                                                           | 工具 handler 全量 try/catch 兜底、渲染/合成阶段超时上限（5.1）；重启后 run 标记 `INTERRUPTED` 可断点续跑（6.5）                                                                      |
-| 14.3 | Pi 的会话恢复是否仅靠下发历史消息即可还原上下文                                                    | 首日验证；不足则退化为落 Pi session 文件 + 重启回读                                                                                                                                  |
-| 14.4 | Pi 版本 API 稳定性（部分能力在生态中被标注 beta）                                                  | 锁定 `package.json` 版本；对 Pi 的调用集中在 `src/agent/pi/` 适配层，便于替换                                                                                                        |
-| 14.5 | `llm_calls` 全文留痕导致存储膨胀（单次请求可达数十 KB）                                            | 仅本机单机、量级可控；`db:trace` 清理命令列入后续（本期手工 SQL 清理）；不为此牺牲自进化语料完整性                                                                                   |
-| 14.6 | `bash` / `write` / `edit` 默认放开后，agent 可越出项目读写，且阶段期为软约束、可能不按引擎指令行动 | 工具调用全量留痕 + 输出脱敏；5.6 的系统提示注入行为边界与引擎纪律；`cwd` 锁定项目；保留 `agent.allow_shell_write_edit: false` 一键收紧；若实际互踩再评估阶段工具白名单               |
-| 14.7 | admin 初始密码 `mongoose-admin` 是写进设计文档的公开约定，任何能访问本机回环端口的人都可尝试登录   | 仅监听 `127.0.0.1`；`must_change_password` 引导首次登录后改密；部署前可用 `server.admin_password_env` 指定的环境变量改为随机初始口令；忘记密码用 `db:user --reset-password` 本机救援 |
-| 14.8 | 大规模重构期间的测试覆盖真空（大量旧测试被删除）                                                   | 按模块推进：先 packages 迁移并保持旧测试通过，再删旧领域，最后加新测试                                                                                                               |
-| 14.9 | Windows 路径（中文、空格、正斜杠）在新目录层级下仍易出错                                           | 统一走 `path-safety.ts`；新增测试覆盖越界、空格、中文、分隔符                                                                                                                        |
+| 编号  | 风险                                                                                                                                | 应对                                                                                                                                                                                                                                                                  |
+| ----- | ----------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 14.1  | Pi 的 provider 注册机制与 Ark Agent Plan 端点兼容性未知                                                                             | 实施首日先做最小连通性验证；不兼容则改用 `ModelRegistry.find` + 自定义 provider（自实现 provider 同时承担 7.2 的埋点）                                                                                                                                                |
+| 14.2  | 单进程后 agent 运行时异常可能拖垮 server                                                                                            | 工具 handler 全量 try/catch 兜底、渲染/合成阶段超时上限（5.1）；重启后 run 标记 `INTERRUPTED` 可断点续跑（6.5）                                                                                                                                                       |
+| 14.3  | Pi 的会话恢复是否仅靠下发历史消息即可还原上下文                                                                                     | 首日验证；不足则退化为落 Pi session 文件 + 重启回读                                                                                                                                                                                                                   |
+| 14.4  | Pi 版本 API 稳定性（部分能力在生态中被标注 beta）                                                                                   | 锁定 `package.json` 版本；对 Pi 的调用集中在 `src/agent/pi/` 适配层，便于替换                                                                                                                                                                                         |
+| 14.5  | `llm_calls` 全文留痕导致存储膨胀（单次请求可达数十 KB）                                                                             | 仅本机单机、量级可控；`db:trace` 清理命令列入后续（本期手工 SQL 清理）；不为此牺牲自进化语料完整性                                                                                                                                                                    |
+| 14.6  | `bash` / `write` / `edit` 默认放开后，agent 可越出项目读写，且阶段期为软约束、可能不按引擎指令行动                                  | 工具调用全量留痕 + 输出脱敏；5.6 的系统提示注入行为边界与引擎纪律；`cwd` 锁定项目；保留 `agent.allow_shell_write_edit: false` 一键收紧；若实际互踩再评估阶段工具白名单                                                                                                |
+| 14.7  | admin 初始密码 `mongoose-admin` 是写进设计文档的公开约定，任何能访问本机回环端口的人都可尝试登录                                    | 仅监听 `127.0.0.1`；`must_change_password` 引导首次登录后改密；部署前可用 `server.admin_password_env` 指定的环境变量改为随机初始口令；忘记密码用 `db:user --reset-password` 本机救援                                                                                  |
+| 14.8  | 大规模重构期间的测试覆盖真空（大量旧测试被删除）                                                                                    | 按模块推进：先 packages 迁移并保持旧测试通过，再删旧领域，最后加新测试                                                                                                                                                                                                |
+| 14.9  | Windows 路径（中文、空格、正斜杠）在新目录层级下仍易出错                                                                            | 统一走 `path-safety.ts`；新增测试覆盖越界、空格、中文、分隔符                                                                                                                                                                                                         |
+| 14.10 | 模型在 Windows 上按 cmd.exe 方言写命令（如 `2>nul`），落盘脏文件并让 `grep` / `find` 等遍历工具持续失败；或工具以相同坏参数空转刷屏 | L0 系统提示声明运行环境与 bash 惯用法；L1 `agent.command_guardrails` 配置驱动命令护栏（改写 / 拒绝，新增防护只改 YAML）；L2 `path-safety` 收敛 Windows 保留名；L3 `agent.tool_failure_circuit_breaker` 相同参数连续失败硬熔断，强制模型换参数或换思路（见 5.4 / 5.6） |
 
 ---
 

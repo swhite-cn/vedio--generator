@@ -48,7 +48,7 @@
 | `borderRadius` | `6`       | 默认                            |
 | `fontFamily`   | 系统栈    | 不引入 Web 字体                 |
 
-布局尺度：顶栏高 48px；侧边栏宽 208px、可折叠到 48px；内容区最大宽 1440px、左右留白 24px；工作台页左右分栏 3:2（最小左栏 480px），窄屏转为 Tab 切换。
+布局尺度：顶栏高 48px；侧边栏宽 208px、可折叠到 48px；内容区最大宽 1440px、左右留白 16px；工作台页左右分栏 3:2（最小左栏 480px），窄屏转为 Tab 切换。
 
 ### 2.3 状态色映射（唯一权威表，全站统一用 Tag/Badge 渲染）
 
@@ -131,7 +131,7 @@
 └──────────┴───────────────────────────────────────────┘
 ```
 
-- `/login` 无框架（独立全屏页）；`/projects/:id` 工作台页隐藏侧边栏（为对话流让出宽度），仅保留顶栏 + 返回链接。
+- `/login` 无框架（独立全屏页）；`/projects/:id` 工作台页与其他页面共用顶栏 + 侧边栏外壳，页内保留返回链接。
 - 响应式断点：< 768px 侧边栏折叠为抽屉；工作台左右分栏 < 900px 切换为顶部 Tab（对话 / 进度与产物）。
 - 所有可交互元素键盘可达；`focus-visible` 有描边；动态区域（对话流、阶段状态）用 `aria-live="polite"`；`prefers-reduced-motion` 下关闭转动与过渡动画。
 
@@ -234,19 +234,28 @@
 
 消息按 `created_at` 升序渲染，滚动锚定底部（用户上翻时不强跳）。消息类型：
 
-| 类型                     | 渲染                                                                          |
-| ------------------------ | ----------------------------------------------------------------------------- |
-| `user`                   | 右侧气泡，蓝底白字                                                            |
-| `assistant`              | 左侧气泡，Markdown 受限渲染；`text_delta` 流式追加到末尾气泡，`turn_end` 定稿 |
-| `system`（引擎阶段指令） | 居中浅灰条："引擎指令：执行 copy 阶段…"，可折叠                               |
-| 工具调用                 | 卡片（非气泡），见下                                                          |
+| 类型                     | 渲染                                                                                            |
+| ------------------------ | ----------------------------------------------------------------------------------------------- |
+| `user`                   | 右侧蓝底白字气泡（含用户头像）                                                                  |
+| `assistant`              | 左侧白底气泡 + 机器人头像，Markdown 受限渲染；`text_delta` 流式追加到末尾气泡，`turn_end` 定稿  |
+| `thinking`               | 折叠「思考过程 · N 字」块（参考 Claude Code）；流式时自动展开，正文开始 / `turn_end` 后自动收起 |
+| `system`（引擎阶段指令） | 居中浅灰胶囊："引擎指令：执行 copy 阶段…"，可折叠                                               |
+| `stageDivider`           | 阶段切换时的居中分隔胶囊（`run_stage` 进入 `running` 且阶段变化时插入）                         |
+| `error`                  | 对话流内红色错误条（与全局 `message.error` 同步）                                               |
+| 工具调用                 | 卡片（非气泡）；同一轮连续的内置工具折叠为「工具组」，见下                                      |
 
 **工具调用卡片**（`tool_start` 建卡 → `tool_end` 收尾）：
 
-- 头部：工具图标 + 中文名（`copy_generate → 文案生成` 等映射表）+ 状态（进行中转动 / 成功绿 / 失败红）+ 耗时。
-- 体部（默认折叠，`Collapse`）：参数摘要（`args_json` 裁剪展示）、产物链接（`artifactPaths` → 点击在产物面板定位或直接预览）、失败时 `errorCode` + 一句话说明。
+- 头部：工具图标 + 中文名（`copy_generate → 文案生成` 等映射表）+ 状态（进行中转动 / 成功绿 / 失败红）+ 耗时（运行中按秒级刷新）。
+- 体部（默认折叠，`Collapse`）：参数摘要（`args_json` 裁剪展示）、输出预览（服务端截断后下发的 `outputPreview`，超限标「已截断」）、`bash` 退出码、产物链接（`artifactPaths` → 点击在产物面板定位或直接预览）、失败时 `errorCode` + 一句话说明。
 - 内置工具（`read/grep/bash/write/edit`）同样建卡，`bash` 显示命令原文（等宽字体，长命令截断 + Tooltip）。
-- 失败卡片提供"查看 trace"锚链，跳到 trace 页对应 `stage_id`。
+- 失败卡片提供"查看 trace"锚链，跳到 trace 页对应阶段（`?stage=`）。
+
+**工具组**（`components/ToolGroup.vue`，内置工具专用）：
+
+- 同一轮内**连续**的内置工具（`read/write/edit/grep/find/ls/bash/powershell`）折叠为一行：`运行了 N 个工具 · 读取文件 ×3 · 执行命令 ×1 · 12.3s`。
+- 展开后逐行列出工具名 + 关键参数（路径 / 命令）+ 状态 + 耗时；单行再展开可看参数全文、输出预览（含截断标注）、退出码、产物链接与失败 trace 锚链。
+- 阶段工具（`copy_generate` 等）不参与折叠，逐条渲染为独立卡片。
 
 **审核卡片**（`review_gate` 事件触发，插入对话流）：
 
@@ -276,13 +285,16 @@
 | ------ | ----------------------------------------------------------------------------------------- |
 | 文案   | `copy.json` 结构化展示：主题、每分镜标题 + 口播全文（`Descriptions` + 列表），不裸显 JSON |
 | 图片   | 缩略图墙（`Image.PreviewGroup`，点击大图预览），按 sceneId 排序                           |
-| 场景   | 各 `scenes/*.html` 的链接列表（新标签页打开，经 `/api/media/*`）                          |
-| 音频   | 每分镜 `Audio` 播放器 + 时长                                                              |
+| 场景   | 各 `scenes/*.html`：`预览动画`（弹窗内 sandbox iframe 从头播放）、`新窗口打开`、`生成信息`、`重生成` |
+| 音频   | 每分镜 `Audio` 播放器 + 时长；`生成信息`、`重新配音`                                       |
 | 时间轴 | `timeline.json` 结构化展示（分镜 × 时长 × 起始时间表）                                    |
 | 成片   | `final.mp4` HTML5 播放器；不存在时显示"尚未合成"                                          |
 
 - 所有媒体经 `GET /api/media/*` 相对路径加载，`<img>/<video>` 带 `alt`/字幕轨道占位。
 - 产物缺失（阶段未跑到）→ 对应 Tab 内 `Empty`"该产物尚未生成"。
+- **生成信息**：数据来自 `GET /api/projects/:id/generations`（项目 `manifest/generations.jsonl` 的最新记录），显示实际提示词、模型、提示词集、是否降级与生成时间；旧产物无记录时如实提示。
+- **重生成**：不直接调用生成接口，而是把「只重新生成场景 sN」写入对话草稿并切回对话 Tab（窄屏），由 agent 按最小范围调用阶段工具，保证仍经三级留痕。
+- 场景预览 iframe 必须同时放行 `allow-scripts allow-same-origin`：场景内的 `../vendor/gsap.min.js` 与配图依赖 `vf_media` Cookie，缺少 `allow-same-origin` 会导致子资源 401、动画时间轴无法创建。
 
 #### 5.4.5 SSE 生命周期（本页）
 
@@ -300,11 +312,11 @@
 **布局**：页头（返回 + "Run #id" + run 状态 Tag + 触发方式 `trigger` + 起止时间 + 总耗时）→ 下方左右分栏（窄屏上下堆叠）：
 
 - 左：`Steps` 竖排七阶段（含 attempt、耗时、`errorCode`；点击选中）。
-- 右：选中阶段的明细 `Tabs`：
-  - **工具调用**：`Table`（工具、状态、耗时、产物数），行展开显示 `args_json`（代码块 + 复制按钮）。
-  - **LLM 调用**：`Table`（模型、prompt/completion tokens、耗时、状态），行展开显示 `request_json` / `response_json` 全文（代码块，默认折叠，` Typography.Paragraph` 可复制）。
-  - **事件**：该阶段相关 SSE 已落库事件的时间序列（`Timeline`）。
-- 数据：`GET /api/runs/:id` + `GET /api/runs/:id/trace`（分页，`Table` 分页器直达后端分页参数）。
+- 右：选中阶段的明细 `Tabs`（顶部显示「当前阶段」与「查看全部留痕」切换；选中阶段同步到地址栏 `?stage=`，工作台工具卡片的 trace 锚链据此直达）：
+  - **工具调用**：`Table`（阶段、工具、状态、耗时、产物数），行展开显示 `args_json` 与输出预览 `output_preview`（代码块 + 复制按钮；超限标注已截断）。
+  - **LLM 调用**：`Table`（阶段、模型、prompt/completion tokens、耗时、状态），行展开显示 `request_json` / `response_json` 全文（代码块，默认折叠，可复制）。
+  - **事件**：由 `runs` / `run_stages` / `tool_calls` / `llm_calls` 合成的只读时间线（`buildRunEvents`，按时间升序；选中阶段时保留该阶段与 run 级事件）。该时间线**不是**原始 SSE 事件流。
+- 数据：`GET /api/runs/:id` + `GET /api/runs/:id/trace`（分页 `?limit=&offset=`，可选 `?stage=` 阶段过滤且 `total` 同步收敛，`Table` 分页器直达后端分页参数）。
 - 只读：本页无任何操作按钮；admin 从 `/admin` 进入时界面相同，数据改走 `GET /api/admin/runs/:id/trace`，仅返回链接回 `/admin`。
 - 长 JSON 展示截断（> 50KB 截断并注明"完整内容本期请用 SQL 查询，`db:trace` 清理/导出命令列入后续"，见主文档 §14.5）。
 
@@ -358,18 +370,19 @@
 
 ### 7.2 SSE 事件 → UI 映射（唯一权威表）
 
-| 事件          | UI 反应                                                                                     |
-| ------------- | ------------------------------------------------------------------------------------------- |
-| `text_delta`  | 追加到对话流末尾 assistant 气泡（无则新建）                                                 |
-| `tool_start`  | 对话流新建工具卡片（loading 态）                                                            |
-| `tool_end`    | 卡片收尾（状态/耗时/产物）；含 `artifactPaths` 时刷新产物面板对应 Tab                       |
-| `turn_end`    | 气泡定稿；隐藏"中断"按钮；输入框解锁                                                        |
-| `run_start`   | 页头 run Tag → 运行中；步骤条复位并从 `fromStage` 起算                                      |
-| `run_stage`   | 更新步骤条对应阶段状态（含 `skipped`）                                                      |
-| `review_gate` | 页头 run Tag → 待审核；对话流插入审核卡片；message 提示"已到审核点"                         |
-| `run_end`     | 页头 run Tag → 终态；成功时产物面板自动切到"成片"Tab；失败时 `message.error` 带 `errorCode` |
-| `resync`      | 丢弃本地消息/run 缓存，全量重拉                                                             |
-| `error`       | 全局 `message.error`（`{code, message}`）                                                   |
+| 事件             | UI 反应                                                                                     |
+| ---------------- | ------------------------------------------------------------------------------------------- |
+| `text_delta`     | 追加到对话流末尾 assistant 气泡（无则新建）；已流式的思考块同时定稿                         |
+| `thinking_delta` | 追加到末尾折叠「思考过程」块（无则新建）；`turn_end` / 正文开始 / `run_end` 时定稿          |
+| `tool_start`     | 对话流新建工具卡片（loading 态，携带 `startedAt` 用于实时耗时）                             |
+| `tool_end`       | 卡片收尾（状态/耗时/产物/退出码/输出预览）；含 `artifactPaths` 时刷新产物面板对应 Tab       |
+| `turn_end`       | 气泡与思考块定稿；隐藏"中断"按钮；输入框解锁                                                |
+| `run_start`      | 页头 run Tag → 运行中；步骤条复位并从 `fromStage` 起算                                      |
+| `run_stage`      | 更新步骤条对应阶段状态（含 `skipped`）；阶段切换进入 `running` 时插入阶段分隔条             |
+| `review_gate`    | 页头 run Tag → 待审核；对话流插入审核卡片；message 提示"已到审核点"                         |
+| `run_end`        | 页头 run Tag → 终态；成功时产物面板自动切到"成片"Tab；失败时 `message.error` 带 `errorCode` |
+| `resync`         | 丢弃本地消息/run 缓存，全量重拉（重拉包含会话历史分页回放）                                 |
+| `error`          | 全局 `message.error`（`{code, message}`）+ 对话流内追加一条可见错误条                       |
 
 ### 7.3 状态归属原则
 

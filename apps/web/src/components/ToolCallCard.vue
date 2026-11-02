@@ -12,6 +12,7 @@ import {
   ToolOutlined,
 } from "@ant-design/icons-vue";
 import { formatDurationMs, formatRunningElapsed } from "./format";
+import { getMediaTicket } from "../services/media-ticket";
 import { buildMediaUrl } from "./media-url";
 import { toolDisplayName } from "./state-mapping";
 import type { ToolCardData } from "../stores/workbench-reducer";
@@ -51,10 +52,20 @@ const isBash = computed(() => props.tool.tool === "bash");
 const now = ref(Date.now());
 let timer: ReturnType<typeof setInterval> | null = null;
 
+/** 媒体票据：产物链接由浏览器直接打开，无法带 Authorization，改用 `?ticket=`。 */
+const mediaTicket = ref("");
+
 onMounted(() => {
   timer = setInterval(() => {
     now.value = Date.now();
   }, 1000);
+  void getMediaTicket()
+    .then((ticket) => {
+      mediaTicket.value = ticket;
+    })
+    .catch((error: unknown) => {
+      console.warn("[web] 媒体票据获取失败", error);
+    });
 });
 
 onUnmounted(() => {
@@ -84,11 +95,11 @@ const bashCommand = computed(() => {
 /** 参数摘要文本。 */
 const argsSummary = computed(() => safeStringify(props.tool.args));
 
-/** 产物链接（把相对路径拼成媒体地址；无项目时回退纯文本）。 */
+/** 产物链接（把相对路径拼成带媒体票据的地址；无项目时回退纯文本）。 */
 const artifacts = computed(() =>
   (props.tool.artifactPaths ?? []).map((path) => ({
     path,
-    url: buildMediaUrl(props.project, path),
+    url: buildMediaUrl(props.project, path, mediaTicket.value),
   })),
 );
 
@@ -157,6 +168,19 @@ function truncate(text: string, max: number): string {
       </a-collapse-panel>
     </a-collapse>
 
+    <!-- 工具输出预览（内置工具的 stdout / 文件片段等） -->
+    <div v-if="tool.outputPreview" class="tool-output">
+      <div class="tool-output-head">
+        <span>输出</span>
+        <span v-if="tool.outputTruncated" class="tool-output-truncated">（已截断）</span>
+      </div>
+      <pre class="tool-output-body">{{ tool.outputPreview }}</pre>
+    </div>
+
+    <div v-if="tool.exitCode !== undefined && tool.exitCode !== null" class="tool-exit">
+      退出码：{{ tool.exitCode }}
+    </div>
+
     <div v-if="artifacts.length > 0" class="tool-artifacts">
       <span class="tool-artifacts-label">产物：</span>
       <template v-for="item in artifacts" :key="item.path">
@@ -186,9 +210,9 @@ function truncate(text: string, max: number): string {
 <style scoped>
 .tool-card {
   padding: 10px 12px;
-  border: 1px solid #f0f0f0;
-  border-radius: 8px;
-  background: #fafafa;
+  border: 1px solid var(--vf-border);
+  border-radius: var(--vf-radius);
+  background: var(--vf-surface);
 }
 
 .tool-card.is-failed {
@@ -216,6 +240,40 @@ function truncate(text: string, max: number): string {
 
 .tool-duration {
   margin-inline-start: auto;
+  color: rgb(0 0 0 / 45%);
+  font-size: 12px;
+}
+
+.tool-output {
+  margin-top: 8px;
+}
+
+.tool-output-head {
+  display: flex;
+  gap: 6px;
+  color: rgb(0 0 0 / 45%);
+  font-size: 12px;
+}
+
+.tool-output-truncated {
+  color: #d46b08;
+}
+
+.tool-output-body {
+  max-height: 280px;
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  overflow: auto;
+  border-radius: 6px;
+  background: #f5f6f8;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.tool-exit {
+  margin-top: 6px;
   color: rgb(0 0 0 / 45%);
   font-size: 12px;
 }

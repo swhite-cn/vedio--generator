@@ -91,18 +91,27 @@ beforeEach(() => {
     profile: "LANDSCAPE_1080P",
     style: "科普",
     runId: "run-1",
-    // 最小配置夹具：本阶段只用到 runtime.max_concurrent_stage
-    config: { runtime: { max_concurrent_stage: 3 } } as unknown as SystemConfig,
+    // 最小配置夹具：本阶段用到 runtime.max_concurrent_stage（渲染 worker）与 runtime.scene_concurrency
+    config: {
+      runtime: { max_concurrent_stage: 3, scene_concurrency: 5 },
+    } as unknown as SystemConfig,
   };
   tools = createStageTools(context) as AnyStageTool[];
 
   kernel.generateCopy.mockResolvedValue({ out: join(projectDir, "copy.json"), sceneCount: 3 });
-  kernel.generateImages.mockResolvedValue({ images: [join(projectDir, "images", "s1.png")] });
+  kernel.generateImages.mockResolvedValue({
+    images: [join(projectDir, "images", "s1.png")],
+    generated: ["s1"],
+  });
   kernel.generateScenes.mockResolvedValue({
     scenes: [join(projectDir, "scenes", "s1.html")],
     fallbacks: [],
+    generated: ["s1"],
   });
-  kernel.generateSpeech.mockResolvedValue({ audios: [join(projectDir, "audio", "s1.mp3")] });
+  kernel.generateSpeech.mockResolvedValue({
+    audios: [join(projectDir, "audio", "s1.mp3")],
+    generated: ["s1"],
+  });
   kernel.generateStoryboard.mockResolvedValue({
     out: join(projectDir, "timeline.json"),
     totalMs: 5000,
@@ -161,37 +170,68 @@ describe("阶段工具：参数 → 内核调用映射", () => {
     );
   });
 
-  test("image_generate：无参调用，copyPath 固定为 <projectDir>/copy.json", async () => {
+  test("image_generate：缺省不传范围时字段为 undefined，copyPath 固定为 <projectDir>/copy.json", async () => {
     await invoke("image_generate");
 
     expect(kernel.generateImages).toHaveBeenCalledWith({
       rootDir,
       copyPath: join(projectDir, "copy.json"),
+      promptSet: undefined,
       runId: "run-1",
+      sceneIds: undefined,
+      promptOverride: undefined,
+      mode: undefined,
     });
   });
 
-  test("scene_generate：profile 取 context.profile，concurrency 取 runtime.max_concurrent_stage", async () => {
+  test("image_generate：定向重生成只透传指定场景与画面描述覆盖", async () => {
+    await invoke("image_generate", {
+      sceneIds: ["s1"],
+      promptOverride: "改成夜景霓虹街道",
+      mode: "all",
+    });
+
+    expect(kernel.generateImages).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sceneIds: ["s1"],
+        promptOverride: "改成夜景霓虹街道",
+        mode: "all",
+      }),
+    );
+  });
+
+  test("scene_generate：profile 取 context.profile，concurrency 取 runtime.scene_concurrency", async () => {
     await invoke("scene_generate");
 
     expect(kernel.generateScenes).toHaveBeenCalledWith({
       rootDir,
       copyPath: join(projectDir, "copy.json"),
+      promptSet: undefined,
       profile: "LANDSCAPE_1080P",
       onlyFallbacks: false,
-      concurrency: 3,
+      concurrency: 5,
       runId: "run-1",
+      sceneIds: undefined,
+      promptOverride: undefined,
     });
   });
 
-  test("tts_generate：speaker 透传", async () => {
-    await invoke("tts_generate", { speaker: "zh-CN-YunxiNeural" });
+  test("scene_generate：定向重生成只透传指定场景", async () => {
+    await invoke("scene_generate", { sceneIds: ["s2"], promptOverride: "更快的节奏" });
+
+    expect(kernel.generateScenes).toHaveBeenCalledWith(
+      expect.objectContaining({ sceneIds: ["s2"], promptOverride: "更快的节奏" }),
+    );
+  });
+
+  test("tts_generate：不接收 speaker 入参，音色固定取配置默认", async () => {
+    await invoke("tts_generate");
 
     expect(kernel.generateSpeech).toHaveBeenCalledWith({
       rootDir,
       copyPath: join(projectDir, "copy.json"),
-      speaker: "zh-CN-YunxiNeural",
       runId: "run-1",
+      sceneIds: undefined,
     });
   });
 
@@ -265,11 +305,17 @@ describe("阶段工具：参数 schema 不含路径", () => {
     expect(Object.keys(properties).sort()).toEqual(["promptSet", "style", "topic"]);
   });
 
-  test("无参工具（image/scene/storyboard）的参数字段为空", () => {
-    for (const name of ["image_generate", "scene_generate", "storyboard_generate"]) {
+  test("场景类工具只暴露定向范围参数，storyboard 仍无参", () => {
+    const expected: Record<string, string[]> = {
+      image_generate: ["mode", "promptOverride", "promptSet", "sceneIds"],
+      scene_generate: ["promptOverride", "promptSet", "sceneIds"],
+      tts_generate: ["sceneIds"],
+      storyboard_generate: [],
+    };
+    for (const [name, fields] of Object.entries(expected)) {
       const properties = (toolByName(name).parameters as { properties: Record<string, unknown> })
         .properties;
-      expect(Object.keys(properties)).toEqual([]);
+      expect(Object.keys(properties).sort()).toEqual(fields);
     }
   });
 

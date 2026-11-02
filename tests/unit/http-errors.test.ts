@@ -38,6 +38,15 @@ describe("ERROR_STATUS 映射（§4.5 + §8.3）", () => {
     // 文档未列，按内核失败归 500
     expect(ERROR_STATUS.QUALITY_BLOCKED).toBe(500);
     expect(ERROR_STATUS.EVENT_IMMUTABLE).toBe(500);
+    // 工具层防护码：命令被护栏拒绝 → 403；重复失败熔断 → 429
+    expect(ERROR_STATUS.TOOL_COMMAND_BLOCKED).toBe(403);
+    expect(ERROR_STATUS.TOOL_CIRCUIT_OPEN).toBe(429);
+    expect(ERROR_STATUS.ASSET_TYPE_UNSUPPORTED).toBe(400);
+    expect(ERROR_STATUS.ASSET_TOO_LARGE).toBe(400);
+    expect(ERROR_STATUS.ASSET_INVALID).toBe(400);
+    expect(ERROR_STATUS.ASSET_NOT_FOUND).toBe(404);
+    expect(ERROR_STATUS.ACTION_CONFIRMATION_REQUIRED).toBe(409);
+    expect(ERROR_STATUS.ACTION_NOT_CONFIRMABLE).toBe(409);
   });
 });
 
@@ -58,6 +67,13 @@ describe("toErrorBody", () => {
   test("VideoForgeError 输出稳定错误码与无前缀 message", () => {
     const body = toErrorBody(new VideoForgeError("AUTH_FORBIDDEN", "需要管理员权限"));
     expect(body).toEqual({ error: { code: "AUTH_FORBIDDEN", message: "需要管理员权限" } });
+  });
+
+  test("资产错误码输出稳定错误体", () => {
+    const body = toErrorBody(new VideoForgeError("ASSET_TYPE_UNSUPPORTED", "文件类型不支持"));
+    expect(body).toEqual({
+      error: { code: "ASSET_TYPE_UNSUPPORTED", message: "文件类型不支持" },
+    });
   });
 
   test("普通 Error 输出 INTERNAL_ERROR 且不泄漏原始 message", () => {

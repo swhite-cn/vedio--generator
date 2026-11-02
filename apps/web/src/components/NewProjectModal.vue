@@ -7,7 +7,7 @@ import { reactive, ref, watch } from "vue";
 import { message } from "ant-design-vue";
 import { useCapabilitiesStore } from "../stores/capabilities";
 import { useProjectsStore, type Project } from "../stores/projects";
-import { formatApiError } from "../services/api";
+import { apiRequest, formatApiError } from "../services/api";
 
 const props = withDefaults(
   defineProps<{
@@ -26,11 +26,14 @@ const emit = defineEmits<{
   (event: "created", project: Project): void;
 }>();
 
-/** 输出 Profile 的固定两项（服务端未提供 Profile 列表接口，见 Web 专题 §5.2）。 */
-const PROFILE_OPTIONS = [
-  { value: "landscape-1080p", label: "横屏 1080p（landscape-1080p）" },
-  { value: "portrait-1080p", label: "竖屏 1080p（portrait-1080p）" },
-] as const;
+/** 默认输出 Profile（`GET /api/profiles` 失败或返回空列表时回退，保证离线可用）。 */
+const DEFAULT_PROFILE_OPTIONS = [
+  { value: "landscape-1080p", label: "横屏 1080p" },
+  { value: "portrait-1080p", label: "竖屏 1080p" },
+];
+
+/** 输出 Profile 选项（来自服务端 `config/profiles/*.yaml`）。 */
+const profileOptions = ref<Array<{ value: string; label: string }>>([...DEFAULT_PROFILE_OPTIONS]);
 
 const capabilitiesStore = useCapabilitiesStore();
 const projectsStore = useProjectsStore();
@@ -84,10 +87,30 @@ function resetWizard(): void {
 }
 
 /**
- * 打开时初始化：加载能力列表；有预选能力则直接进入第二步。
+ * 拉取服务端可用输出 Profile（失败时保留本地默认项）。
+ */
+async function loadProfiles(): Promise<void> {
+  try {
+    const result = await apiRequest<{ profiles: Array<{ value: string; label: string }> }>(
+      "/api/profiles",
+    );
+    if (result.profiles.length > 0) {
+      profileOptions.value = result.profiles;
+      if (!profileOptions.value.some((item) => item.value === formState.profile)) {
+        formState.profile = profileOptions.value[0]!.value;
+      }
+    }
+  } catch (error) {
+    console.warn("[web] Profile 列表加载失败，回退本地默认项", error);
+  }
+}
+
+/**
+ * 打开时初始化：加载能力列表与输出 Profile；有预选能力则直接进入第二步。
  */
 async function initialize(): Promise<void> {
   resetWizard();
+  void loadProfiles();
   try {
     const list = await capabilitiesStore.load();
     if (props.initialCapabilityId && list.some((item) => item.id === props.initialCapabilityId)) {
@@ -214,8 +237,8 @@ watch(
         <a-input v-model:value="formState.style" placeholder="可选，如：轻松科普" />
       </a-form-item>
       <a-form-item label="输出 Profile" name="profile">
-        <a-select v-model:value="formState.profile" :options="[...PROFILE_OPTIONS]" />
-        <p class="profile-hint">选项来源：前端固定两项（服务端暂未提供 Profile 列表接口）。</p>
+        <a-select v-model:value="formState.profile" :options="profileOptions" />
+        <p class="profile-hint">选项来自服务端 `config/profiles/*.yaml`。</p>
       </a-form-item>
     </a-form>
 

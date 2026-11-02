@@ -74,6 +74,12 @@ export interface ToolCardData {
   artifactPaths?: string[];
   /** 建卡时间（服务端 `tool_start.startedAt`），用于展示运行中卡片的实时耗时。 */
   startedAt?: string;
+  /** bash 退出码（服务端 `tool_end.exitCode`）。 */
+  exitCode?: number | null;
+  /** 工具输出预览（截断后的纯文本）。 */
+  outputPreview?: string | null;
+  /** 输出是否被截断。 */
+  outputTruncated?: boolean;
   /** 建卡时 run 的当前阶段（仅用于点击阶段时滚动定位，见 Web 专题 §5.4.3）。 */
   stage?: string | null;
 }
@@ -89,7 +95,8 @@ export interface ReviewCardData {
 }
 
 /** 对话流消息类型。 */
-export type WorkbenchMessageKind = "user" | "assistant" | "system" | "tool" | "review";
+export type WorkbenchMessageKind =
+  "user" | "assistant" | "thinking" | "system" | "tool" | "review" | "error" | "stageDivider";
 
 /** 对话流中的一条消息（气泡 / 工具卡片 / 审核卡片统一建模）。 */
 export interface WorkbenchMessage {
@@ -97,6 +104,8 @@ export interface WorkbenchMessage {
   kind: WorkbenchMessageKind;
   /** 文本消息内容（user / assistant / system）。 */
   text?: string;
+  /** 用户消息已持久化的项目资产引用摘要。 */
+  assetRefs?: Array<{ id: string; label: string; kind: string; mime_type?: string; size_bytes?: number }>;
   /** 工具卡片（kind === "tool"）。 */
   tool?: ToolCardData;
   /** 审核卡片（kind === "review"）。 */
@@ -239,7 +248,32 @@ function stageLabel(stage: string | null | undefined): string {
 // ---------------------------------------------------------------------------
 
 /**
+ * `thinking_delta`：追加到对话流末尾的思考块（无则新建）；正文开始时定稿。
+ * @param state 当前状态
+ * @param text 增量文本
+ * @returns 新状态
+ */
+function applyThinkingDelta(state: WorkbenchState, text: string): WorkbenchState {
+  if (text.length === 0) {
+    return state;
+  }
+  const messages = [...state.messages];
+  const last = messages[messages.length - 1];
+  if (last && last.kind === "thinking" && last.streaming) {
+    messages[messages.length - 1] = { ...last, text: (last.text ?? "") + text };
+  } else {
+    const settled = messages.map((message) =>
+      message.kind === "thinking" && message.streaming ? { ...message, streaming: false } : message,
+    );
+    settled.push({ id: `thinking-${settled.length}`, kind: "thinking", text, streaming: true });
+    return { ...state, messages: settled, agentStreaming: true };
+  }
+  return { ...state, messages, agentStreaming: true };
+}
+
+/**
  * `text_delta`：追加到对话流末尾 assistant 气泡（无则新建）。
+ * 正文开始即视为思考过程结束。
  * @param state 当前状态
  * @param text 增量文本
  * @returns 新状态
@@ -248,7 +282,9 @@ function applyTextDelta(state: WorkbenchState, text: string): WorkbenchState {
   if (text.length === 0) {
     return state;
   }
-  const messages = [...state.messages];
+  const messages = state.messages.map((message) =>
+    message.kind === "thinking" && message.streaming ? { ...message, streaming: false } : message,
+  );
   const last = messages[messages.length - 1];
   if (last && last.kind === "assistant" && last.streaming) {
     messages[messages.length - 1] = { ...last, text: (last.text ?? "") + text };
@@ -290,6 +326,9 @@ function applyToolEnd(state: WorkbenchState, data: Record<string, unknown>): Wor
   const artifactPaths = Array.isArray(data.artifactPaths)
     ? (data.artifactPaths as string[])
     : undefined;
+  const outputPreview = typeof data.outputPreview === "string" ? data.outputPreview : undefined;
+  const outputTruncated = data.outputTruncated === true;
+  const exitCode = typeof data.exitCode === "number" ? data.exitCode : undefined;
   let matched = false;
 
   const messages = state.messages.map((message) => {
@@ -305,6 +344,9 @@ function applyToolEnd(state: WorkbenchState, data: Record<string, unknown>): Wor
         durationMs: typeof data.durationMs === "number" ? data.durationMs : message.tool.durationMs,
         errorCode: typeof data.errorCode === "string" ? data.errorCode : message.tool.errorCode,
         artifactPaths: artifactPaths ?? message.tool.artifactPaths,
+        outputPreview: outputPreview ?? message.tool.outputPreview,
+        outputTruncated: outputTruncated || message.tool.outputTruncated,
+        exitCode: exitCode ?? message.tool.exitCode,
       },
     };
   });
@@ -321,6 +363,9 @@ function applyToolEnd(state: WorkbenchState, data: Record<string, unknown>): Wor
         durationMs: typeof data.durationMs === "number" ? data.durationMs : undefined,
         errorCode: typeof data.errorCode === "string" ? data.errorCode : null,
         artifactPaths,
+        outputPreview: outputPreview ?? null,
+        outputTruncated,
+        exitCode: exitCode ?? null,
       },
     });
   }
@@ -340,7 +385,9 @@ function applyToolEnd(state: WorkbenchState, data: Record<string, unknown>): Wor
  */
 function applyTurnEnd(state: WorkbenchState): WorkbenchState {
   const messages = state.messages.map((message) =>
-    message.kind === "assistant" && message.streaming ? { ...message, streaming: false } : message,
+    (message.kind === "assistant" || message.kind === "thinking") && message.streaming
+      ? { ...message, streaming: false }
+      : message,
   );
   return { ...state, messages, agentStreaming: false };
 }
@@ -420,11 +467,26 @@ function applyRunStage(state: WorkbenchState, data: Record<string, unknown>): Wo
     ? { ...state.currentRun, status: runStatus, current_stage: stage }
     : blankRun("");
 
+  // 阶段切换时插入分隔条（与 Claude Code 的阶段标题一致，便于长对话中定位）
+  let messages = state.messages;
+  const previousStage = state.currentRun?.current_stage ?? null;
+  if (status === "running" && stage && stage !== previousStage) {
+    messages = [
+      ...messages,
+      {
+        id: `divider-${stage}-${attempt}-${messages.length}`,
+        kind: "stageDivider",
+        text: stage,
+      },
+    ];
+  }
+
   const refresh = status === "done" && artifactPaths && artifactPaths.length > 0;
   return {
     ...state,
     stages,
     currentRun,
+    messages,
     artifactRefreshToken: refresh ? state.artifactRefreshToken + 1 : state.artifactRefreshToken,
   };
 }
@@ -473,7 +535,11 @@ function applyRunEnd(state: WorkbenchState, data: Record<string, unknown>): Work
   return {
     ...state,
     currentRun,
-    messages,
+    messages: messages.map((message) =>
+      (message.kind === "assistant" || message.kind === "thinking") && message.streaming
+        ? { ...message, streaming: false }
+        : message,
+    ),
     agentStreaming: false,
     finalReady: status === "done",
     artifactRefreshToken:
@@ -510,6 +576,8 @@ export function applyEvent(state: WorkbenchState, frame: SseFrame): WorkbenchSta
   switch (frame.type) {
     case "text_delta":
       return applyTextDelta(state, String(data.text ?? ""));
+    case "thinking_delta":
+      return applyThinkingDelta(state, String(data.text ?? ""));
     case "tool_start":
       return applyToolStart(state, data);
     case "tool_end":
@@ -529,6 +597,14 @@ export function applyEvent(state: WorkbenchState, frame: SseFrame): WorkbenchSta
     case "error":
       return {
         ...state,
+        messages: [
+          ...state.messages,
+          {
+            id: `error-${state.messages.length}`,
+            kind: "error",
+            text: `${String(data.message ?? "未知错误")}（${String(data.code ?? "UNKNOWN")}）`,
+          },
+        ],
         lastError: {
           code: String(data.code ?? "UNKNOWN"),
           message: String(data.message ?? "未知错误"),

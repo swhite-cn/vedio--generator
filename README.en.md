@@ -112,6 +112,17 @@ The initial account is `admin`; its password is the built-in default or the valu
 - While `chat_model` is the placeholder `PLEASE_FILL_CHAT_MODEL_ID`, the `copy` stage refuses to run.
 - Prompts are configurable: three template files under `config/prompts/<set>/`; the default set is chosen by
   `prompts.default_set`.
+- Agent behavior switches: `agent.allow_shell_write_edit` (default `true`, grants `bash` / `write` / `edit`),
+  `agent.show_thinking` (default `true`, streams and persists model reasoning), and
+  `agent.tool_output_preview_chars` (default `8192`, range 256-65536, tool output preview cap, truncated above).
+- Tool guardrails: `agent.tool_failure_circuit_breaker` (default `3`, range 0-20, hard-trips after that many
+  consecutive failures of the same tool + params; `0` disables) and `agent.command_guardrails` (pre-flight rules
+  for `bash`, by default rewriting cmd-style `2>nul` to `2>/dev/null`; rules are config data — add one entry to add
+  a guard, set `[]` to disable).
+- Concurrency: `runtime.max_concurrent_stage` (default `1`, global stage-tool concurrency cap, keeps ffmpeg/Chromium
+  from contending) and `runtime.scene_concurrency` (default `3`, range 1-8, in-stage concurrency for scene
+  generation; it is pure network I/O and can be raised independently to shorten the `scene` stage, but too high may
+  hit Ark rate limits).
 
 ## Commands
 
@@ -166,17 +177,18 @@ More screens in `design-mockups/` (login, project list, capability center, admin
 
 - End-to-end validation against the real Ark service is still manual; `pnpm test:smoke` only covers the real
   Chromium rendering segment.
-- `POST /api/runs/:id/cancel` marks the run `canceled` but does not abort the in-flight stage.
-- The trace "events" tab has no backend query route yet; `GET /api/admin/projects` does not derive project
-  status.
-- The new-project dialog exposes a fixed set of two output profiles.
+- `POST /api/runs/:id/cancel` marks the run `canceled` and cooperatively aborts the in-flight agent turn (the
+  LLM request is aborted and the engine checks the cancel flag at stage boundaries); tool calls already
+  dispatched to a subprocess may still finish.
+- The trace "events" tab timeline is synthesized from `runs` / `run_stages` / `tool_calls` / `llm_calls`
+  rather than a raw SSE event stream (the design keeps no events table).
 - There is no ESLint rule set yet; style is enforced by Prettier plus `tsc`.
 
 ## Roadmap
 
-- [ ] Cooperative cancellation for in-flight stages
-- [ ] Trace "events" timeline query API
-- [ ] Profile listing API and more output formats
+- [ ] Hard subprocess cancellation (ffmpeg / Playwright interrupts)
+- [ ] Raw event-stream table and replay
+- [ ] More output formats and custom profiles
 - [ ] ESLint rule set and stricter CI quality gates
 - [ ] Linux / macOS compatibility validation
 

@@ -11,6 +11,7 @@
     "@earendil-works/pi-ai": "1.4.0",
     "@earendil-works/pi-coding-agent": "1.4.0",
     "@fastify/jwt": "^10.0.0",
+    "@fastify/multipart": "^9.3.0",
     "@videoforge/pipeline": "workspace:*",
     "@videoforge/renderer": "workspace:*",
     "@videoforge/shared": "workspace:*",

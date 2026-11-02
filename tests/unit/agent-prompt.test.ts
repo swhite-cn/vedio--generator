@@ -46,6 +46,20 @@ describe("buildSystemPrompt：系统提示覆盖 §5.6 五条要求", () => {
     expect(prompt).toContain(".env.local");
     expect(prompt).toContain("只在当前项目目录内");
   });
+
+  test("包含最小影响范围约束：定向重生成必须传 sceneIds", () => {
+    const prompt = buildSystemPrompt();
+    expect(prompt).toContain("最小影响范围");
+    expect(prompt).toContain("sceneIds");
+    expect(prompt).toContain("promptOverride");
+    expect(prompt).toContain("省略 `sceneIds` 等于整批重画");
+  });
+
+  test("包含生成清单回溯约定", () => {
+    const prompt = buildSystemPrompt();
+    expect(prompt).toContain("manifest/generations.jsonl");
+    expect(prompt).toContain("生成上下文回溯");
+  });
 });
 
 describe("resolveSkillDirs：技能目录解析", () => {

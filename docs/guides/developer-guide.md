@@ -85,6 +85,7 @@ Copy-Item config\system.local.example.yaml config\system.local.yaml
 runtime:
   storage_root: "D:/videoforge-storage"
   max_concurrent_stage: 1
+  scene_concurrency: 3
   minimum_free_disk_gb: 30
 
 tools:
@@ -100,6 +101,8 @@ engines:
 ```
 
 完整字段及注释见 [`config/system.local.example.yaml`](../../config/system.local.example.yaml) 与 [`config/default.yaml`](../../config/default.yaml)。
+
+`agent` 段有默认值即可用，无需必填：`tool_failure_circuit_breaker`（默认 `3`，相同「工具 + 参数」连续失败达此次数后硬熔断，`0` 关闭）与 `command_guardrails`（默认含一条把 cmd 风格 `2>nul` 改写为 `2>/dev/null` 的规则；置 `[]` 完全关闭）。要新增一类命令防护，只需往 `command_guardrails` 追加一条规则，不必改服务端代码。
 
 ### 3.1 密钥（只允许环境变量或 `.env.local`）
 
@@ -248,7 +251,7 @@ pnpm --filter @videoforge/cli start project:verify --project <项目 id>
 
 ## 9. 数据与工件
 
-启动 API 时，`startServer` 读取 `runtime.storage_root`，创建 `videoforge.db`，执行迁移并打开数据库。新领域共 8 张表：`users`、`projects`、`sessions`、`messages`、`runs`、`run_stages`、`tool_calls`、`llm_calls`。迁移会 `DROP` 旧 Build/Voice 领域表（P12 已彻底移除）。
+启动 API 时，`startServer` 读取 `runtime.storage_root`，创建 `videoforge.db`，执行迁移并打开数据库。新领域共 11 张表：`users`、`projects`、`sessions`、`messages`、`runs`、`run_stages`、`tool_calls`、`llm_calls`，以及资产图谱相关的 `project_assets`、`message_asset_refs`、`agent_actions`。迁移会 `DROP` 旧 Build/Voice 领域表（P12 已彻底移除）。
 
 - schema 与迁移：`apps/server/src/db/schema.ts`、`apps/server/src/db/migrate.ts`
 - 仓储：`apps/server/src/db/repositories/`（actor-first 签名，按 `Actor` 隔离）
@@ -257,6 +260,34 @@ pnpm --filter @videoforge/cli start project:verify --project <项目 id>
 `run_stages` 为追加式多行（同一阶段每次重试各一行），Web trace 页按阶段折叠展示。事件、质检结果与审核记录均为追加式，不覆盖历史结论。
 
 `tool_calls` 会带上 `run_id` / `stage_id`：会话在创建时构建工具闭包，引擎进入阶段时通过 `setStageTrace` 注入当前 run/阶段，退出时清空。`llm_calls` 同样带上 `run_id` / `stage_id`：provider 在每次请求时按 `streamOptions.sessionId` 反查会话注册表，取该会话专属的 trace store 与当前阶段上下文。三类记录（`run_stages` / `tool_calls` / `llm_calls`）都会双写项目目录下的 `trace.jsonl`，行首 `type` 字段区分 `run_stage` / `tool_call` / `llm_call`。
+
+### 9.1 生成清单（manifest）
+
+每个项目目录下新增 `manifest/generations.jsonl`，由 `packages/pipeline/src/manifest.ts` 追加写入，一行一次模型调用：
+
+- 记录内容：`stage`、`sceneId`、`assetPath`、`model`、`promptSet`、完整 `prompt`、`promptSha256`、`params`、`templateSnapshot`、`ok`、`fallback`、`durationMs`、`supersedesId`、`createdAt`；
+- 追加式且不覆盖历史：重新生成同一产物会产生新记录，并通过 `supersedesId` 串联版本链；
+- 失败也留痕：模型调用失败或降级为内置模板时同样写入，便于解释产物来源；
+- 不写密钥：只记录提示词与参数，`prompt` 走既有脱敏规则；
+- 读取接口：`GET /api/projects/:id/generations` 返回每个产物的最新一条记录，供 Web 产物面板展示。
+
+写入方为 `copy:gen` / `image:gen` / `scene:gen` / `tts:gen` 四个阶段能力；`runId` 由阶段工具上下文透传。
+
+### 9.2 定向重生成与生成阶段留痕
+
+三个生图/动画/配音工具支持可选范围参数，缺省仍为全量，保持向后兼容：
+
+| 工具 | 可用参数 |
+| --- | --- |
+| `image_generate` | `sceneIds`、`promptOverride`（仅单场景）、`promptSet`、`mode`（`all` / `missing`） |
+| `scene_generate` | `sceneIds`、`promptOverride`（仅单场景）、`promptSet` |
+| `tts_generate` | `sceneIds` |
+
+- `sceneIds` 必须是 `copy.json` 中真实存在的 ID，否则 `CONFIG_INVALID`；
+- 图片覆盖前会归档到 `images/history/<sceneId>-<timestamp>.png`，保证可回退；
+- 阶段模型调用不经过 Pi provider，因此由 `apps/server/src/trace/generation-mirror.ts` 在工具执行结束后，把本次新增的 manifest 记录镜像进 `llm_calls`（图像只记元数据，不记 base64）。
+
+系统提示词（`apps/server/src/agent/prompt.ts`）要求 Agent 默认做最小改动：用户指出具体分镜时必须传 `sceneIds`，只有明确要求整体重做才允许省略。
 
 ## 10. 常见问题
 

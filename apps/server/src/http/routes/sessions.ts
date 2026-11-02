@@ -4,8 +4,13 @@ import type { HttpDeps } from "../deps.js";
 import { createAuthPreHandler, extractActor, requireActor } from "../auth-hook.js";
 import { EVENT_TICKET_TTL_MS, signEventTicket, verifyEventTicket } from "../event-ticket.js";
 import { getSseHeaders, startHeartbeat, writeSseEvent } from "../sse.js";
-import { appendMessage } from "../../db/repositories/message-repository.js";
+import { appendMessage, listMessagesPage } from "../../db/repositories/message-repository.js";
 import { getSession } from "../../db/repositories/session-repository.js";
+import {
+  createMessageAssetRefs,
+  getProjectAssetsByIds,
+  listMessageAssetRefs,
+} from "../../db/repositories/asset-repository.js";
 
 /**
  * 会话路由（见设计文档 §4.2、§4.4、§8.3 事件层）。
@@ -25,13 +30,32 @@ export function registerSessionRoutes(app: FastifyInstance, deps: HttpDeps): voi
   app.post("/api/sessions/:id/messages", { preHandler: authPreHandler }, async (request, reply) => {
     const actor = requireActor(request);
     const { id } = request.params as { id: string };
-    const body = (request.body ?? {}) as { text?: unknown };
+    const body = (request.body ?? {}) as { text?: unknown; assetIds?: unknown };
     const text = typeof body.text === "string" ? body.text : "";
     if (text.length === 0) {
       throw new VideoForgeError("CONFIG_INVALID", "消息内容不能为空");
     }
-    if (!getSession(deps.db, actor, id)) {
+    const session = getSession(deps.db, actor, id);
+    if (!session) {
       throw new VideoForgeError("AUTH_FORBIDDEN", `会话不存在：${id}`);
+    }
+    if (body.assetIds !== undefined && !Array.isArray(body.assetIds)) {
+      throw new VideoForgeError("ASSET_INVALID", "资产引用必须是数组");
+    }
+    const assetIds = [
+      ...new Set(
+        (Array.isArray(body.assetIds) ? body.assetIds : []).filter(
+          (assetId): assetId is string => typeof assetId === "string" && assetId.length > 0,
+        ),
+      ),
+    ];
+    if (assetIds.length > deps.config.assets.max_message_refs) {
+      throw new VideoForgeError("ASSET_INVALID", "单条消息引用资产数量超过限制");
+    }
+    if (
+      getProjectAssetsByIds(deps.db, actor, session.project_id, assetIds).length !== assetIds.length
+    ) {
+      throw new VideoForgeError("AUTH_FORBIDDEN", "引用资产不存在或不属于当前项目");
     }
 
     const message = appendMessage(deps.db, actor, {
@@ -39,9 +63,47 @@ export function registerSessionRoutes(app: FastifyInstance, deps: HttpDeps): voi
       role: "user",
       payload: { role: "user", content: text },
     });
+    const assetRefs = createMessageAssetRefs(deps.db, actor, message.id, assetIds);
     await deps.chat.send(actor, id, message);
     reply.code(202);
-    return { message };
+    return { message, asset_refs: assetRefs };
+  });
+
+  /** 会话消息历史（游标分页，按创建时间升序返回）。 */
+  app.get("/api/sessions/:id/messages", { preHandler: authPreHandler }, async (request, reply) => {
+    const actor = requireActor(request);
+    const { id } = request.params as { id: string };
+    if (!getSession(deps.db, actor, id)) {
+      throw new VideoForgeError("AUTH_FORBIDDEN", `会话不存在：${id}`);
+    }
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    const limitRaw = typeof query.limit === "string" ? Number(query.limit) : undefined;
+    const limit = Number.isFinite(limitRaw) ? limitRaw : undefined;
+    const before =
+      typeof query.before === "string" && query.before.length > 0 ? query.before : undefined;
+    const page = listMessagesPage(deps.db, actor, id, { limit, before });
+    const refsByMessage = listMessageAssetRefs(
+      deps.db,
+      actor,
+      page.messages.map((message) => message.id),
+    );
+    const refIds = [...refsByMessage.values()].flat().map((ref) => ref.asset_id);
+    const messageSession = getSession(deps.db, actor, id);
+    const assets = messageSession
+      ? getProjectAssetsByIds(deps.db, actor, messageSession.project_id, [...new Set(refIds)])
+      : [];
+    const assetsById = new Map(assets.map((asset) => [asset.id, asset]));
+    reply.code(200);
+    return {
+      ...page,
+      messages: page.messages.map((message) => ({
+        ...message,
+        asset_refs: (refsByMessage.get(message.id) ?? []).flatMap((ref) => {
+          const asset = assetsById.get(ref.asset_id);
+          return asset ? [{ ...ref, asset }] : [];
+        }),
+      })),
+    };
   });
 
   /** 中断当前自由对话轮。 */

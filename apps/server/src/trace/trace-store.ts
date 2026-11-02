@@ -59,6 +59,10 @@ export interface TraceToolCallInput {
   errorCode?: string | null;
   durationMs: number;
   artifactPaths?: string[];
+  /** 工具输出预览（截断后的纯文本）。 */
+  outputPreview?: string | null;
+  /** 输出是否被截断。 */
+  outputTruncated?: boolean;
 }
 
 /** LLM 调用留痕入参（`id` / `created_at` 由仓储生成）。 */
@@ -145,6 +149,8 @@ export function createTraceStore(options: CreateTraceStoreOptions): TraceStore {
         errorCode: input.errorCode ?? null,
         durationMs: input.durationMs,
         artifactPaths: input.artifactPaths ?? [],
+        outputPreview: input.outputPreview ?? null,
+        outputTruncated: input.outputTruncated ?? false,
       });
       appendTraceLine(projectDirForSession(record.session_id), {
         type: "tool_call",
@@ -158,6 +164,8 @@ export function createTraceStore(options: CreateTraceStoreOptions): TraceStore {
         error_code: record.error_code,
         duration_ms: record.duration_ms,
         artifact_paths: record.artifact_paths,
+        output_preview: record.output_preview ?? null,
+        output_truncated: record.output_truncated ?? false,
         created_at: record.created_at,
       });
       return record;

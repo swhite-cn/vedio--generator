@@ -11,10 +11,10 @@ VideoForge 是面向 Windows 本机使用的 pnpm monorepo，当前为**轻量�
 已知边界（不要把以下能力描述成已上线）：
 
 - **真实 Ark 端到端验收仍未完成**：需用户在 `config/system.local.yaml` 填真实 `chat_model`、在 `.env.local` 填 `ARK_API_KEY` 与 `JWT_SECRET` 后手动验证；`pnpm test:smoke` 仅覆盖真 Chromium 渲染段（`tests/integration`，不含 Ark 调用，找不到本机 Chrome 时跳过，不进全量单测）。
-- `POST /api/runs/:id/cancel` 只把 run 置为 `canceled`，**不终止在途阶段**；在途阶段结束后可能把 run 覆盖为 `failed`。属工作流引擎待修项。
-- trace 页「事件」Tab 无后端查询路由；`GET /api/admin/projects` 不做项目状态推导，状态恒为库内 `draft`。
+- `POST /api/runs/:id/cancel` 会把 run 置为 `canceled` 并协作式中止在途 agent 轮次（LLM 请求被 abort，引擎在各阶段边界检查取消标记）；已进入子进程的工具调用仍可能跑完，属已知限制。
+- trace 页「事件」Tab 的时间线由 `buildRunEvents` 用 `runs` / `run_stages` / `tool_calls` / `llm_calls` 合成，**不是**原始 SSE 事件流（设计文档不建 events 表）。`GET /api/admin/projects` 已按 `deriveProjectStatus` + 成品存在性推导真实状态。
 - `tool_calls` / `llm_calls` 均按 run / 阶段归属：工具调用由引擎注入会话阶段上下文，LLM 调用由 provider 按 `streamOptions.sessionId` 反查会话留痕目标；`trace.jsonl` 同时写入 `tool_call` / `llm_call` / `run_stage` 三类行。
-- 新建项目 Modal 的输出 Profile 为前端固定两项（服务端未提供 Profile 列表接口）。
+- 新建项目 Modal 的输出 Profile 来自 `GET /api/profiles`（读取 `config/profiles/*.yaml`）；接口失败时回退前端两项默认值。
 - 服务端仅监听 `127.0.0.1`，不构成可对外部署的服务。
 
 ## 技术栈与目录

@@ -54,7 +54,7 @@ export interface StageToolContext {
   style?: string;
   /** 运行 ID（写运行轨迹用）。 */
   runId?: string;
-  /** 系统配置（本文件只用到 `runtime.max_concurrent_stage`）。 */
+  /** 系统配置（本文件只用到 `runtime.max_concurrent_stage` 与 `runtime.scene_concurrency`）。 */
   config: SystemConfig;
 }
 
@@ -118,13 +118,6 @@ const STAGE_TOOL_NAMES = [
 /** 把绝对路径转成相对项目目录的展示路径（统一正斜杠，便于跨平台断言与展示）。 */
 function toProjectRelative(projectDir: string, target: string): string {
   return relative(projectDir, target).split(sep).join("/");
-}
-
-/** 过滤并转换内核返回的产物路径列表（内核允许返回 `undefined` 表示该场景无产物）。 */
-function toArtifacts(projectDir: string, paths: Array<string | undefined>): string[] {
-  return paths
-    .filter((path): path is string => typeof path === "string")
-    .map((path) => toProjectRelative(projectDir, path));
 }
 
 /** 列出 `config/profiles/` 下已登记的 Profile 名（去掉 `.yaml` 后缀）。 */
@@ -266,7 +259,10 @@ export function createStageTools(
   const copyPath = join(context.projectDir, "copy.json");
   const timelinePath = join(context.projectDir, "timeline.json");
   const finalPath = join(context.projectDir, "final.mp4");
-  const concurrency = context.config.runtime.max_concurrent_stage;
+  // 渲染阶段的 worker 数沿用全局阶段并发上限，避免 Chromium/GPU 争抢资源
+  const renderWorkers = context.config.runtime.max_concurrent_stage;
+  // 场景生成是纯网络 IO，使用独立并发度，不受 max_concurrent_stage 限制
+  const sceneConcurrency = context.config.runtime.scene_concurrency;
 
   // 工具参数 schema：绝不包含路径字段，产物位置一律由 context 决定
   const copyParameters = Type.Object({
@@ -277,9 +273,44 @@ export function createStageTools(
     ),
   });
   const emptyParameters = Type.Object({});
-  const ttsParameters = Type.Object({
-    speaker: Type.Optional(Type.String({ description: "TTS 说话人；缺省用配置默认说话人" })),
+  // 场景范围入参：定向重生成的最小执行单元，避免"改一张图导致全部重画"
+  const sceneScopeParameters = {
+    sceneIds: Type.Optional(
+      Type.Array(Type.String({ minLength: 1 }), {
+        description:
+          '只处理这些场景（如 ["s1"]）；省略表示全部场景。用户只说"第 N 个/某一张"时必须传，不可省略。',
+      }),
+    ),
+  };
+  const imageParameters = Type.Object({
+    ...sceneScopeParameters,
+    promptOverride: Type.Optional(
+      Type.String({
+        description:
+          "覆盖该场景的画面描述（纯视觉，不含文字）；只能配合单个 sceneIds 使用，用于单张精调",
+      }),
+    ),
+    promptSet: Type.Optional(
+      Type.String({ description: "提示词集名（config/prompts/<集名>/）；缺省用配置默认集" }),
+    ),
+    mode: Type.Optional(
+      Type.Union([Type.Literal("all"), Type.Literal("missing")], {
+        description: "all=重画指定场景；missing=只补缺失图片，已存在的保持不动",
+      }),
+    ),
   });
+  const sceneParameters = Type.Object({
+    ...sceneScopeParameters,
+    promptOverride: Type.Optional(
+      Type.String({
+        description: "该场景的额外动画/视觉要求；只能配合单个 sceneIds 使用",
+      }),
+    ),
+    promptSet: Type.Optional(
+      Type.String({ description: "提示词集名（config/prompts/<集名>/）；缺省用配置默认集" }),
+    ),
+  });
+  const ttsParameters = Type.Object({ ...sceneScopeParameters });
   const profileParameters = Type.Object({
     profile: Type.String({
       minLength: 1,
@@ -309,35 +340,52 @@ export function createStageTools(
     },
   };
 
-  const imageSpec: StageToolSpec<typeof emptyParameters> = {
+  const imageSpec: StageToolSpec<typeof imageParameters> = {
     name: "image_generate",
     label: "配图生成",
     description:
-      "按 copy.json 的口播与画面描述逐场景生成配图，写入项目内的 images/ 并回填 copy.json。需先完成 copy_generate。",
-    parameters: emptyParameters,
-    async run(_params, ctx) {
-      const result = await generateImages({ rootDir: ctx.rootDir, copyPath, runId: ctx.runId });
-      const artifacts = toArtifacts(ctx.projectDir, result.images);
-      return { summary: `已生成 ${artifacts.length} 张配图（images/）。`, artifacts };
+      "按 copy.json 的口播与画面描述逐场景生成配图，写入项目内的 images/ 并回填 copy.json。需先完成 copy_generate。用户只要求改某一张图时，必须传 sceneIds 只重画该场景（可用 promptOverride 给出新画面描述）；只有用户明确要求整体重做时才省略 sceneIds。",
+    parameters: imageParameters,
+    async run(params, ctx) {
+      const result = await generateImages({
+        rootDir: ctx.rootDir,
+        copyPath,
+        promptSet: params.promptSet,
+        runId: ctx.runId,
+        sceneIds: params.sceneIds,
+        promptOverride: params.promptOverride,
+        mode: params.mode,
+      });
+      const artifacts = result.generated.map((sceneId) => `images/${sceneId}.png`);
+      return {
+        summary:
+          artifacts.length > 0
+            ? `已生成 ${artifacts.length} 张配图（images/）：${result.generated.join(", ")}。`
+            : "没有需要生成的配图（目标图片已存在或范围为空）。",
+        artifacts,
+      };
     },
   };
 
-  const sceneSpec: StageToolSpec<typeof emptyParameters> = {
+  const sceneSpec: StageToolSpec<typeof sceneParameters> = {
     name: "scene_generate",
     label: "场景生成",
     description:
-      "为每个场景生成 HTML+GSAP 动画页面，写入项目内的 scenes/ 并回填 copy.json。需先完成 copy_generate（有配图效果更好）。",
-    parameters: emptyParameters,
-    async run(_params, ctx) {
+      "为每个场景生成 HTML+GSAP 动画页面，写入项目内的 scenes/ 并回填 copy.json。需先完成 copy_generate（有配图效果更好）。用户只要求改某个场景的动画时，必须传 sceneIds 只重做该场景（可用 promptOverride 描述期望的动画/视觉）；只有明确要求整体重做时才省略 sceneIds。",
+    parameters: sceneParameters,
+    async run(params, ctx) {
       const result = await generateScenes({
         rootDir: ctx.rootDir,
         copyPath,
+        promptSet: params.promptSet,
         profile: ctx.profile,
         onlyFallbacks: false,
-        concurrency,
+        concurrency: sceneConcurrency,
         runId: ctx.runId,
+        sceneIds: params.sceneIds,
+        promptOverride: params.promptOverride,
       });
-      const artifacts = toArtifacts(ctx.projectDir, result.scenes);
+      const artifacts = result.generated.map((sceneId) => `scenes/${sceneId}.html`);
       const fallbackNote =
         result.fallbacks.length > 0 ? `，其中 ${result.fallbacks.length} 个场景使用了降级模板` : "";
       return {
@@ -351,17 +399,20 @@ export function createStageTools(
     name: "tts_generate",
     label: "语音合成",
     description:
-      "按 copy.json 的逐场景口播合成语音，写入项目内的 audio/ 并回填 copy.json。需先完成 copy_generate。",
+      "按 copy.json 的逐场景口播合成语音，写入项目内的 audio/ 并回填 copy.json。需先完成 copy_generate。音色固定取配置 engines.endpoints.ark.tts_speaker，不接受入参覆盖。只重新配音某个场景时传 sceneIds，不要省略后整批重跑。",
     parameters: ttsParameters,
     async run(params, ctx) {
       const result = await generateSpeech({
         rootDir: ctx.rootDir,
         copyPath,
-        speaker: params.speaker,
         runId: ctx.runId,
+        sceneIds: params.sceneIds,
       });
-      const artifacts = toArtifacts(ctx.projectDir, result.audios);
-      return { summary: `已合成 ${artifacts.length} 段语音（audio/）。`, artifacts };
+      const artifacts = result.generated.map((sceneId) => `audio/${sceneId}.mp3`);
+      return {
+        summary: `已合成 ${artifacts.length} 段语音（audio/）：${result.generated.join(", ") || "无"}。`,
+        artifacts,
+      };
     },
   };
 
@@ -399,7 +450,7 @@ export function createStageTools(
         copyPath,
         timelinePath,
         profile,
-        workers: concurrency,
+        workers: renderWorkers,
         runId: ctx.runId,
       });
       const artifact = toProjectRelative(ctx.projectDir, result.framesDir);

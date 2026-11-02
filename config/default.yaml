@@ -19,8 +19,21 @@ runtime:
   storage_root: "storage"
   # 阶段工具全局并发上限，最小为 1；默认 1 避免 ffmpeg/Chromium 争抢资源。
   max_concurrent_stage: 1
+  # 场景生成（scene 阶段）内部并发度，范围为 1-8；该阶段是纯网络 IO（逐场景调 Ark 生成 HTML），
+  # 与 max_concurrent_stage 的资源竞争约束解耦，默认 3 以缩短串行等待；取值过大会触发 Ark 限流。
+  scene_concurrency: 3
   # 任务启动前要求的最小可用磁盘空间，单位为 GB。
   minimum_free_disk_gb: 30
+
+assets:
+  # 单个用户上传文件最大字节数，范围 1-1073741824；超限返回 ASSET_TOO_LARGE。
+  # 文件仅写入项目受控 assets/uploads 目录，服务端不接受用户提供的绝对路径。
+  max_upload_bytes: 52428800
+  # 单个项目用户上传文件总量最大字节数，范围 1-10737418240；必须不小于单文件上限。
+  # 达到上限后拒绝新上传，不删除既有资产。
+  max_project_upload_bytes: 524288000
+  # 单条聊天消息最多引用的资产数，范围 1-32；超限返回 ASSET_INVALID。
+  max_message_refs: 12
 
 tools:
   # 空值表示由 Playwright 管理浏览器。
@@ -39,6 +52,31 @@ agent:
   # 是否向 agent 放开 bash / write / edit；默认放开（true）。
   # 关闭后仅保留 read/grep/find/ls 等只读工具；安全性依赖审计留痕与系统提示约束。
   allow_shell_write_edit: true
+  # 是否向 Web 推送并持久化模型思考过程（Ark reasoning_content）；默认开启（true）。
+  # 关闭后对话流不显示思考块，历史回放亦不含思考内容（正文与工具调用不受影响）。
+  show_thinking: true
+  # 工具输出预览字符上限，范围 256-65536；默认 8192。
+  # 超出部分截断并标注「已截断」；仅用于留痕与对话流展示，工具输出全文不落库。
+  tool_output_preview_chars: 8192
+  # 相同（工具 + 参数）连续失败达此次数后硬熔断，范围 0-20；0 表示关闭熔断。
+  # 熔断后完全相同的调用不再执行本体，直接返回 TOOL_CIRCUIT_OPEN，强制模型换参数或换思路。
+  tool_failure_circuit_breaker: 3
+  # bash 命令预检护栏规则（配置驱动，按列表顺序匹配命令原文）。
+  # 规则是数据不是代码：新增一类要拦的命令写法只需在此追加一条，不改服务端代码。
+  # 字段：id 规则标识 / pattern ECMAScript 正则 / flags 正则标志（g i m s u y，可省略）/
+  #       action 命中动作（rewrite 改写后继续执行，reject 直接拒绝并回报 hint）/
+  #       replacement action=rewrite 时的替换字面量（替换整段匹配）/
+  #       hint 命中原因与正确写法（reject 时作为错误信息返回给模型）。
+  # 置为空列表（[]）即完全关闭命令护栏。
+  command_guardrails:
+    # 例：模型在 Windows 上按 cmd 习惯写 `where magick 2>nul`，
+    # 在 bash 下会生成名为 nul 的文件并让后续 grep/find 全部失败；此处改写为等价的 stderr 丢弃。
+    - id: "cmd-nul-redirect"
+      pattern: ">\\s*nul\\b"
+      flags: "i"
+      action: "rewrite"
+      replacement: ">/dev/null"
+      hint: "cmd 风格的 >nul 在 bash 下会创建名为 nul 的文件（并破坏后续 grep/find）；丢弃 stderr 请用 2>/dev/null。"
 
 workflow:
   # 阶段失败后 agent 自救重试上限，范围 0-5；超限时该 run 置为 failed。

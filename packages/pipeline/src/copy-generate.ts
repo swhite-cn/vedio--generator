@@ -1,8 +1,10 @@
+import { dirname } from "node:path";
 import { VideoForgeError } from "@videoforge/shared";
 import { arkChatCompletion } from "./ark-client.js";
 import { copyDocSchema, writeCopyDoc, type CopyDoc } from "./copy-contract.js";
 import { loadSystemConfig, type SystemConfig } from "./config.js";
 import { getArkApiKey } from "./env.js";
+import { appendGenerationRecord } from "./manifest.js";
 import { loadPromptSet, renderTemplate, type PromptSet } from "./prompts.js";
 
 /** 加载系统配置与 Ark 凭据；配置非法或密钥缺失时由底层抛错（不记录密钥） */
@@ -73,16 +75,32 @@ export async function generateCopy(options: {
     );
   }
   const prompts = resolvePrompts(options.rootDir, options.promptSet, config);
+  const systemPrompt = renderTemplate(prompts.copySystem, { style: options.style });
+  const userPrompt = `主题：${options.topic}\n风格：${options.style}`;
+  const startedAt = Date.now();
   const text = await arkChatCompletion({
     baseUrl: ark.base_url,
     apiKey,
     model: ark.chat_model,
     messages: [
-      { role: "system", content: renderTemplate(prompts.copySystem, { style: options.style }) },
-      { role: "user", content: `主题：${options.topic}\n风格：${options.style}` },
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
     ],
   });
   const parsed = parseCopyJson(text, options.topic, options.style);
   writeCopyDoc(options.outFile, parsed);
+  // 文案是后续所有场景的源头，必须留痕：精调单个分镜时需要回溯当时的选题与风格
+  appendGenerationRecord(dirname(options.outFile), {
+    runId: options.runId,
+    stage: "copy",
+    assetPath: "copy.json",
+    model: ark.chat_model,
+    promptSet: prompts.name,
+    prompt: `${systemPrompt}\n\n---\n\n${userPrompt}`,
+    params: { topic: options.topic, style: options.style, sceneCount: parsed.scenes.length },
+    templateSnapshot: { "copy-system.txt": prompts.copySystem },
+    ok: true,
+    durationMs: Date.now() - startedAt,
+  });
   return { out: options.outFile, sceneCount: parsed.scenes.length };
 }

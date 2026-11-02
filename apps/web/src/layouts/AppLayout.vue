@@ -1,39 +1,24 @@
 <script setup lang="ts">
 /**
- * 全局工作台外壳（Web 专题 §4）：顶栏 48px + 侧边栏（208px，可折叠到 48px）+ 内容区。
- * `<768px` 时侧边栏折叠为抽屉；`/admin` 菜单仅 admin 渲染；
- * `hideSider` 为 true 时（工作台页）不渲染侧边栏与折叠按钮，仅保留顶栏 + 页面内返回链接。
+ * 全局工作台外壳（Web 专题 §4）：顶栏 48px + 固定侧边栏 208px + 内容区。
+ * `<768px` 时改用抽屉导航；`/admin` 菜单仅 admin 渲染。
+ * 侧边栏不提供折叠按钮：设计稿采用固定宽度侧栏，保持内容区宽度稳定。
  */
 import { computed, h, onMounted, onUnmounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
   AppstoreOutlined,
-  MenuFoldOutlined,
   MenuOutlined,
-  MenuUnfoldOutlined,
   ProjectOutlined,
   SettingOutlined,
   UserOutlined,
 } from "@ant-design/icons-vue";
 import { useAuthStore } from "../stores/auth";
 
-const props = withDefaults(
-  defineProps<{
-    /** 隐藏侧边栏（工作台页使用，为对话流让出宽度）。 */
-    hideSider?: boolean;
-  }>(),
-  { hideSider: false },
-);
-
 const auth = useAuthStore();
 const route = useRoute();
 const router = useRouter();
 
-/** 是否隐藏侧边栏（工作台页）。 */
-const hideSider = computed(() => props.hideSider);
-
-/** 侧边栏折叠状态（桌面端）。 */
-const collapsed = ref(false);
 /** 窄屏抽屉开关。 */
 const drawerOpen = ref(false);
 /** 是否处于窄屏（<768px）。 */
@@ -123,21 +108,12 @@ onUnmounted(() => {
   <a-layout class="app-layout">
     <a-layout-header class="app-header">
       <a-button
-        v-if="!hideSider && isNarrow"
+        v-if="isNarrow"
         type="text"
         aria-label="打开导航"
         @click="drawerOpen = true"
       >
         <menu-outlined />
-      </a-button>
-      <a-button
-        v-else-if="!hideSider"
-        type="text"
-        :aria-label="collapsed ? '展开侧边栏' : '折叠侧边栏'"
-        @click="collapsed = !collapsed"
-      >
-        <menu-unfold-outlined v-if="collapsed" />
-        <menu-fold-outlined v-else />
       </a-button>
 
       <span class="app-brand" role="link" tabindex="0" @click="goHome" @keydown.enter="goHome">
@@ -156,16 +132,7 @@ onUnmounted(() => {
     </a-layout-header>
 
     <a-layout>
-      <a-layout-sider
-        v-if="!isNarrow && !hideSider"
-        v-model:collapsed="collapsed"
-        collapsible
-        :trigger="null"
-        :width="208"
-        :collapsed-width="48"
-        theme="light"
-        class="app-sider"
-      >
+      <a-layout-sider v-if="!isNarrow" :width="208" theme="light" class="app-sider">
         <a-menu
           mode="inline"
           :selected-keys="selectedKeys"
@@ -200,19 +167,20 @@ onUnmounted(() => {
 
 .app-header {
   display: flex;
-  height: 48px;
+  height: var(--vf-header-height);
   align-items: center;
   gap: 8px;
   padding: 0 16px;
-  background: #fff;
-  border-block-end: 1px solid #f0f0f0;
-  line-height: 48px;
+  border-block-end: 1px solid var(--vf-border);
+  background: var(--vf-surface);
+  line-height: var(--vf-header-height);
 }
 
 .app-brand {
-  color: rgb(0 0 0 / 88%);
-  font-size: 17px;
+  color: var(--vf-text);
+  font-size: 16px;
   font-weight: 700;
+  letter-spacing: 0.01em;
   cursor: pointer;
 }
 
@@ -225,19 +193,30 @@ onUnmounted(() => {
 }
 
 .app-sider {
-  border-inline-end: 1px solid #f0f0f0;
+  border-inline-end: 1px solid var(--vf-border);
+}
+
+.app-sider :deep(.ant-menu) {
+  border-inline-end: 0;
 }
 
 .app-content {
   min-height: 0;
   overflow: auto;
-  background: #f5f5f5;
+  background: var(--vf-canvas);
 }
 
 .content-inner {
-  max-width: 1440px;
+  /* Trace 页需要更宽的表格，默认按 1440 收敛；工作台页铺满该宽度 */
+  max-width: var(--vf-trace-max);
   margin: 0 auto;
-  padding: 24px;
+  padding: 16px;
+}
+
+@media (max-width: 767.98px) {
+  .content-inner {
+    padding: 12px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

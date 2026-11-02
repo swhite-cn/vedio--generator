@@ -87,6 +87,72 @@ export const messages = sqliteTable(
   (table) => [index("idx_messages_session").on(table.sessionId)],
 );
 
+/** 项目资产表：统一登记用户上传素材与流水线生成产物。 */
+export const projectAssets = sqliteTable(
+  "project_assets",
+  {
+    id: id(),
+    projectId: text("project_id").notNull(),
+    /** `source ∈ generated|uploaded`。 */
+    source: text("source").notNull(),
+    /** 资产类型见共享 `PROJECT_ASSET_KINDS`。 */
+    kind: text("kind").notNull(),
+    label: text("label").notNull(),
+    /** 相对项目目录、使用 POSIX `/` 分隔符。 */
+    relativePath: text("relative_path").notNull(),
+    mimeType: text("mime_type").notNull(),
+    sizeBytes: integer("size_bytes").notNull(),
+    runId: text("run_id"),
+    stage: text("stage"),
+    supersedesAssetId: text("supersedes_asset_id"),
+    metadataJson: text("metadata_json").notNull().default("{}"),
+    createdAt: timestamp(),
+  },
+  (table) => [
+    index("idx_project_assets_project_created").on(table.projectId, table.createdAt),
+    index("idx_project_assets_run").on(table.runId),
+    uniqueIndex("idx_project_assets_path").on(table.projectId, table.relativePath),
+  ],
+);
+
+/** 消息资产引用表：保存用户消息引用项目资产的稳定关系。 */
+export const messageAssetRefs = sqliteTable(
+  "message_asset_refs",
+  {
+    id: id(),
+    messageId: text("message_id").notNull(),
+    assetId: text("asset_id").notNull(),
+    ordinal: integer("ordinal").notNull(),
+    createdAt: timestamp(),
+  },
+  (table) => [
+    index("idx_message_asset_refs_message").on(table.messageId),
+    uniqueIndex("idx_message_asset_refs_message_asset").on(table.messageId, table.assetId),
+  ],
+);
+
+/** Agent 动作表：记录分析、可逆改动及待确认的高影响请求。 */
+export const agentActions = sqliteTable(
+  "agent_actions",
+  {
+    id: id(),
+    projectId: text("project_id").notNull(),
+    sessionId: text("session_id").notNull(),
+    messageId: text("message_id").notNull(),
+    kind: text("kind").notNull(),
+    status: text("status").notNull(),
+    planJson: text("plan_json").notNull(),
+    runId: text("run_id"),
+    errorCode: text("error_code"),
+    createdAt: timestamp(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    index("idx_agent_actions_message").on(table.messageId),
+    index("idx_agent_actions_project").on(table.projectId),
+  ],
+);
+
 /** 任务运行表，见设计文档 §11 `runs`；run 是项目租约的载体（见 §8.4）。 */
 export const runs = sqliteTable(
   "runs",
@@ -146,6 +212,10 @@ export const toolCalls = sqliteTable(
     errorCode: text("error_code"),
     durationMs: integer("duration_ms").notNull(),
     artifactPaths: text("artifact_paths").notNull().default("[]"),
+    /** 工具输出预览（截断后的纯文本，见 §7.3；全文不落库）。 */
+    outputPreview: text("output_preview"),
+    /** 输出是否被截断（落库 0/1）。 */
+    outputTruncated: integer("output_truncated", { mode: "boolean" }).notNull().default(false),
     createdAt: timestamp(),
   },
   (table) => [
