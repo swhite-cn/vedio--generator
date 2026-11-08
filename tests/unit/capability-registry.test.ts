@@ -12,9 +12,9 @@ describe("内置能力注册表", () => {
     expect(BUILT_IN_CAPABILITIES[0]?.id).toBe("video-generation");
   });
 
-  test("阶段数为 7 且顺序逐项等于 PIPELINE_STAGES", () => {
+  test("阶段数为 8 且顺序逐项等于 PIPELINE_STAGES", () => {
     const stages = BUILT_IN_CAPABILITIES[0]?.stages ?? [];
-    expect(stages).toHaveLength(7);
+    expect(stages).toHaveLength(8);
     expect(stages.map((stage) => stage.stage)).toEqual([...PIPELINE_STAGES]);
   });
 

@@ -1,4 +1,4 @@
-import type { CapabilityStageDeclaration, Project } from "@videoforge/shared";
+import type { CapabilityStageDeclaration, Project, RunScope } from "@videoforge/shared";
 
 // ---------------------------------------------------------------------------
 // 阶段指令构造（见设计文档 §6.3「阶段指令」）。
@@ -24,6 +24,8 @@ export interface StageInstructionInput {
   previousErrorCode?: string | null;
   /** 用户 retry 反馈（仅审核点重跑时非空）。 */
   feedback?: string | null;
+  /** 镜头级重生成范围；整片 run 为空。 */
+  scope?: RunScope | null;
 }
 
 /**
@@ -61,10 +63,19 @@ function hasText(value: string | null | undefined): value is string {
  * @returns 可直接下发 / 落库的指令正文（多行中文文本）
  */
 export function buildStageInstruction(input: StageInstructionInput): string {
-  const { stage, project, profile, attempt, previousErrorCode, feedback } = input;
+  const { stage, project, profile, attempt, previousErrorCode, feedback, scope } = input;
 
   // 第一行：阶段展示名 + 阶段工具名，全部取自能力声明，避免本模块硬编码阶段知识
   const lines: string[] = [`执行「${stage.label}」阶段：调用 \`${stage.tool}\`。`];
+
+  // 镜头级范围：明确只重生成目标镜头，并要求阶段工具按 shotIds 收窄执行范围
+  if (scope?.shotIds && scope.shotIds.length > 0) {
+    lines.push(
+      `本次为镜头级重生成：只处理镜头 ${scope.shotIds.join("、")}。` +
+        "调用 image_generate / tts_generate 时必须传 shotIds；scene_generate 按这些镜头所属的 sceneIds 定向执行；" +
+        "captions / storyboard 等确定性阶段按全量重算，不得改动其它镜头内容。",
+    );
+  }
 
   // 项目上下文：topic 恒定写入，style 为空则省略该片段，profile 恒定写入
   const context: string[] = [`topic=${project.topic}`];

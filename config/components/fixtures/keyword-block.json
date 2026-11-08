@@ -1,0 +1,8 @@
+{
+  "componentId": "keyword-block",
+  "props": {
+    "title": "孤独的神经元",
+    "subtitle": "信号如何在突触间放大",
+    "underline": "sweep"
+  }
+}

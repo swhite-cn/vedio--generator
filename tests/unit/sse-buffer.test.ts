@@ -63,7 +63,7 @@ describe("createEventBus: 事件构造与 id 分配", () => {
     expect(event.at).toBe(new Date(fixed).toISOString());
   });
 
-  test("SSE_EVENT_TYPES 覆盖 §4.4 事件类型（含思考增量）", () => {
+  test("SSE_EVENT_TYPES 覆盖 §4.4 十类 + 方案 §7.2 增量四类", () => {
     expect(SSE_EVENT_TYPES).toEqual([
       "text_delta",
       "thinking_delta",
@@ -76,8 +76,30 @@ describe("createEventBus: 事件构造与 id 分配", () => {
       "run_end",
       // Agent 动作确认/取消事件（工作台确认卡）
       "agent_action",
+      // 方案 §7.2 增量（T119）：镜头/质检/资产/预览
+      "shot.updated",
+      "quality.updated",
+      "asset.bound",
+      "preview.ready",
       "resync",
       "error",
+    ]);
+  });
+
+  test("方案 §7.2 新事件类型可发布、进缓冲并支持 Last-Event-ID 续传", () => {
+    const bus = createEventBus({ now: () => 0 });
+    const first = bus.publish("session-v2", "shot.updated", { shotId: "sh-001", specUpdated: false });
+    bus.publish("session-v2", "quality.updated", { projectId: "p1" });
+    bus.publish("session-v2", "asset.bound", { assetId: "a1", boundShots: 2 });
+    bus.publish("session-v2", "preview.ready", { shotId: "sh-001" });
+
+    expect(bus.bufferSize("session-v2")).toBe(4);
+    const replayed = bus.replay("session-v2", first.id);
+    expect(replayed.resync).toBe(false);
+    expect(replayed.events.map((event) => event.type)).toEqual([
+      "quality.updated",
+      "asset.bound",
+      "preview.ready",
     ]);
   });
 });

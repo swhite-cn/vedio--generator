@@ -4,7 +4,6 @@ import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { VideoForgeError, type Actor } from "@videoforge/shared";
 import type { SystemConfig } from "@videoforge/pipeline";
-import { writeCopyDoc, type CopyDoc } from "@videoforge/pipeline";
 import { createDatabase, migrateDatabase } from "../../apps/server/src/db";
 import { createProject } from "../../apps/server/src/db/repositories/project-repository";
 import { createRun, getRun } from "../../apps/server/src/db/repositories/run-repository";
@@ -22,6 +21,14 @@ import {
   type WorkflowEvent,
 } from "../../apps/server/src/workflow/engine";
 import { buildStageInstruction } from "../../apps/server/src/workflow/stage-instruction";
+import {
+  buildFixtureCopyV2,
+  writeFixtureCaptions,
+  writeFixtureCopyV2,
+  writeFixtureCues,
+  writeFixtureSceneSpec,
+  writeFixtureTimeline,
+} from "./helpers/v2-project-fixture";
 
 /**
  * 工作流引擎主循环与阶段指令单测（Phase 8 P8-B）。
@@ -57,41 +64,27 @@ function writeProjectFile(dir: string, relativePath: string, content: string): v
   writeFileSync(target, content, "utf-8");
 }
 
-/** 合法的 copy.json 文档（通过 copy-contract 校验）。 */
-function validCopyDoc(): CopyDoc {
-  return {
-    topic: "黑洞是什么",
-    style: "科普",
-    title: "黑洞",
-    scenes: [
-      {
-        sceneId: "s1",
-        title: "引言",
-        narration: "黑洞是时空中的一个区域。",
-        imagePrompt: "深空中的黑洞",
-      },
-    ],
-  };
-}
-
-/** 按阶段写出能让产物判据达标的产物（测试夹具允许含阶段知识）。 */
+/** 按阶段写出能让 v2 产物判据达标的产物（测试夹具允许含阶段知识）。 */
 function writeStageArtifact(request: StageExecutionRequest): string[] {
   const dir = request.projectDir;
   switch (request.stage) {
     case "copy":
-      writeCopyDoc(join(dir, "copy.json"), validCopyDoc());
+      writeFixtureCopyV2(dir);
       return ["copy.json"];
     case "image":
       writeProjectFile(dir, "images/cover.png", "png");
       return ["images/cover.png"];
     case "scene":
-      writeProjectFile(dir, "scenes/s1.html", "<html></html>");
-      return ["scenes/s1.html"];
+      writeFixtureSceneSpec(dir, buildFixtureCopyV2());
+      return ["scenes/spec.json"];
     case "tts":
-      writeProjectFile(dir, "audio/s1.mp3", "mp3");
-      return ["audio/s1.mp3"];
+      writeFixtureCues(dir, buildFixtureCopyV2());
+      return ["audio/cues.json"];
+    case "captions":
+      writeFixtureCaptions(dir);
+      return ["captions/subtitle.ass"];
     case "storyboard":
-      writeProjectFile(dir, "timeline.json", JSON.stringify({ scenes: [] }));
+      writeFixtureTimeline(dir);
       return ["timeline.json"];
     case "render":
       writeProjectFile(dir, `build/render/${request.profile}/frames/f1.jpg`, "jpg");
@@ -141,7 +134,16 @@ function makeFakeExecutor(
 function makeEngine(
   executor: StageExecutor,
   config: SystemConfig,
-  options: { onStageChange?: (record: StageChangeRecord) => void } = {},
+  options: {
+    onStageChange?: (record: StageChangeRecord) => void;
+    onStageCompleted?: (input: {
+      actor: typeof userA;
+      run: any;
+      project: any;
+      projectDir: string;
+      stage: any;
+    }) => Promise<void>;
+  } = {},
 ) {
   const events: WorkflowEvent[] = [];
   const engine = createWorkflowEngine({
@@ -151,6 +153,7 @@ function makeEngine(
     executeStage: executor,
     emit: (event) => events.push(event),
     onStageChange: options.onStageChange,
+    onStageCompleted: options.onStageCompleted,
   });
   return { engine, events };
 }
@@ -272,6 +275,88 @@ describe("buildStageInstruction：阶段指令正文（纯函数）", () => {
     });
     expect(text).toContain("用户反馈：文案再口语化一点");
   });
+
+  test("scope 带 shotIds 时追加镜头级范围说明", () => {
+    const text = buildStageInstruction({
+      stage: copyStage,
+      project: { topic: "黑洞是什么", style: null, profile: "landscape-1080p" },
+      profile: "landscape-1080p",
+      attempt: 0,
+      scope: { shotIds: ["sh-001"], fromStage: "image" },
+    });
+    expect(text).toContain("镜头级重生成");
+    expect(text).toContain("sh-001");
+    expect(text).toContain("shotIds");
+  });
+
+  test("scope 为空时不出现镜头级范围说明", () => {
+    const text = buildStageInstruction({
+      stage: copyStage,
+      project: { topic: "黑洞是什么", style: null, profile: "landscape-1080p" },
+      profile: "landscape-1080p",
+      attempt: 0,
+      scope: null,
+    });
+    expect(text).not.toContain("镜头级重生成");
+  });
+});
+
+describe("workflow engine：镜头级重生成 scope", () => {
+  test("fromStage 强制从指定阶段开始，前序阶段记 skipped", async () => {
+    const { executor, calls } = makeFakeExecutor();
+    const { engine, events } = makeEngine(executor, makeConfig());
+    // 镜头级重生成发生在已有项目上：copy.json 已存在，故 tts 的 cue 覆盖判据可满足
+    writeFixtureCopyV2(resolveUserProjectDir(directory, userA.userId, PROJECT_NAME));
+    const runId = createRun(database.db, userA, {
+      projectId,
+      sessionId,
+      trigger: "user",
+      scope: { shotIds: ["sh-001"], fromStage: "tts" },
+    }).id;
+
+    const run = await engine.run(userA, runId);
+    // 全阶段跑完 → done；copy/image/scene 三阶段被 fromStage 跳过
+    expect(run.status).toBe("done");
+    const skippedStages = listRunStages(database.db, userA, runId)
+      .filter((row) => row.status === "skipped")
+      .map((row) => row.stage);
+    expect(skippedStages).toEqual(["copy", "image", "scene"]);
+
+    // 执行序列从 tts 开始（含独立字幕轨 captions）
+    expect(calls.map((call) => call.stage)).toEqual([
+      "tts",
+      "captions",
+      "storyboard",
+      "render",
+      "compose",
+    ]);
+
+    // 阶段指令包含镜头范围说明
+    const scopedInstructions = listMessages(database.db, userA, sessionId).filter(
+      (message) =>
+        message.run_id === runId &&
+        message.role === "system" &&
+        JSON.stringify(message.payload).includes("镜头级重生成"),
+    );
+    expect(scopedInstructions.length).toBeGreaterThanOrEqual(4);
+
+    // run_start 事件携带 scope
+    const runStart = events.find((event) => event.type === "run_started");
+    expect(runStart?.payload?.scope).toEqual({ shotIds: ["sh-001"], fromStage: "tts" });
+  });
+
+  test("fromStage 不在能力声明中时报 CONFIG_INVALID", async () => {
+    const { executor } = makeFakeExecutor();
+    const { engine } = makeEngine(executor, makeConfig());
+    const runId = createRun(database.db, userA, {
+      projectId,
+      sessionId,
+      trigger: "user",
+      scope: { shotIds: ["sh-001"], fromStage: "not-a-stage" as never },
+    }).id;
+
+    await expect(engine.run(userA, runId)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+  });
 });
 
 describe("workflow engine：状态推进与审核点", () => {
@@ -315,7 +400,7 @@ describe("workflow engine：状态推进与审核点", () => {
     expect(calls[1].stage).toBe("image");
   });
 
-  test("连续 approve 到终态：七阶段全 done 且 final.mp4 存在 → run done", async () => {
+  test("连续 approve 到终态：八阶段全 done 且 final.mp4 存在 → run done", async () => {
     const { executor } = makeFakeExecutor();
     const { engine } = makeEngine(executor, makeConfig());
 
@@ -327,10 +412,52 @@ describe("workflow engine：状态推进与审核点", () => {
     expect(result.status).toBe("done");
     expect(result.ended_at).not.toBeNull();
     const rows = listRunStages(database.db, userA, runId);
-    expect(rows).toHaveLength(7);
+    expect(rows).toHaveLength(8);
     for (const row of rows) {
       expect(row.status).toBe("done");
     }
+  });
+
+  test("onStageCompleted：按执行顺序收到每个 done 阶段（T207 质检钩子挂点）", async () => {
+    const { executor } = makeFakeExecutor();
+    const completed: string[] = [];
+    const { engine } = makeEngine(executor, makeConfig(), {
+      onStageCompleted: async ({ stage }) => {
+        completed.push(stage);
+      },
+    });
+
+    const runId = newRun();
+    await engine.run(userA, runId);
+    await engine.resume(userA, runId, "approve");
+    await engine.resume(userA, runId, "approve");
+
+    expect(completed).toEqual([
+      "copy",
+      "image",
+      "scene",
+      "tts",
+      "captions",
+      "storyboard",
+      "render",
+      "compose",
+    ]);
+  });
+
+  test("onStageCompleted 抛错只告警，不阻塞 run 推进到 done", async () => {
+    const { executor } = makeFakeExecutor();
+    const { engine } = makeEngine(executor, makeConfig(), {
+      onStageCompleted: async () => {
+        throw new Error("quality gate exploded");
+      },
+    });
+
+    const runId = newRun();
+    await engine.run(userA, runId);
+    await engine.resume(userA, runId, "approve");
+    const result = await engine.resume(userA, runId, "approve");
+
+    expect(result.status).toBe("done");
   });
 });
 
@@ -355,7 +482,7 @@ describe("workflow engine：断点续跑与重试", () => {
 
   test("预置 copy.json：新 run 从 image 起，copy 标 skipped，首调即 image", async () => {
     const projectDir = resolveUserProjectDir(directory, userA.userId, PROJECT_NAME);
-    writeCopyDoc(join(projectDir, "copy.json"), validCopyDoc());
+    writeFixtureCopyV2(projectDir);
 
     const { executor, calls } = makeFakeExecutor();
     const { engine } = makeEngine(executor, makeConfig());
@@ -371,7 +498,7 @@ describe("workflow engine：断点续跑与重试", () => {
 
   test("onStageChange：断点前阶段上报 skipped，带回该 run 与 actor", async () => {
     const projectDir = resolveUserProjectDir(directory, userA.userId, PROJECT_NAME);
-    writeCopyDoc(join(projectDir, "copy.json"), validCopyDoc());
+    writeFixtureCopyV2(projectDir);
 
     const changes: StageChangeRecord[] = [];
     const { executor } = makeFakeExecutor();
@@ -415,7 +542,7 @@ describe("workflow engine：断点续跑与重试", () => {
         if (request.stage === "copy") {
           copyCalls += 1;
           if (copyCalls === 3) {
-            writeCopyDoc(join(request.projectDir, "copy.json"), validCopyDoc());
+            writeFixtureCopyV2(request.projectDir);
           }
         }
       },

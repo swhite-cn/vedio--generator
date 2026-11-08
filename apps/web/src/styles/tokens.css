@@ -1,0 +1,102 @@
+/**
+ * VideoForge v2 设计令牌（唯一来源）。
+ *
+ * 规则：
+ * - 所有颜色、圆角、字号、间距只能引用本文件变量，页面与组件禁止写魔法值；
+ * - 只允许深色主题；禁止渐变、玻璃拟态、彩色投影；
+ * - 禁止用 rgba 叠色做遮罩/阴影，遮罩用纯色 + opacity；
+ * - 成片视觉令牌以 --film- 前缀隔离，只用于预览画布，不得用于界面控件。
+ *
+ * 本文件在 T301 接入 App Shell 后全局引入；T007 阶段只落地令牌，不改变现有页面。
+ */
+:root {
+  /* --- 背景层级：页面 < 侧栏 < 卡片 < 内嵌 --- */
+  --bg: #0b0e13;
+  --deep: #07090d;
+  --surface: #141821;
+  --surface-2: #1b2130;
+  --inset: #0d1117;
+  --border: #262e3d;
+  --border-soft: #1d2430;
+
+  /* --- 文本三级 --- */
+  --text: #edf1f7;
+  --text-sec: #97a3b4;
+  --text-ter: #626d7e;
+
+  /* --- 品牌主色（唯一强调色） --- */
+  --accent: #7b6cff;
+  --accent-soft: #232041;
+
+  /* --- 语义色：前景 / 软底成对使用 --- */
+  --success: #3dd68c;
+  --success-soft: #122b20;
+  --danger: #f26d6d;
+  --danger-soft: #331b1f;
+  --warning: #f5b14c;
+  --warning-soft: #33270f;
+  --info: #56b3f5;
+  --info-soft: #12283b;
+  --teal: #3bd5b0;
+  --teal-soft: #0f2b26;
+
+  /* --- 成片视觉令牌：只用于预览画布/主题展示 --- */
+  --film-text: #e5e0d5;
+  --film-bg: #111310;
+  --film-accent: #f1e21d;
+  --film-secondary-1: #b33630;
+  --film-secondary-2: #3bd5b0;
+  --film-secondary-3: #4904f5;
+
+  /* --- 字体 --- */
+  --font-sans: "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+
+  /* --- 字号阶梯 --- */
+  --font-size-caption: 10.5px;
+  --font-size-meta: 11.5px;
+  --font-size-small: 12px;
+  --font-size-body: 13px;
+  --font-size-card-title: 14px;
+  --font-size-page-title: 20px;
+  --line-height-body: 1.5;
+
+  /* --- 字重 --- */
+  --font-weight-regular: 400;
+  --font-weight-strong: 600;
+
+  /* --- 圆角 --- */
+  --radius-card: 12px;
+  --radius-control: 8px;
+  --radius-pill: 999px;
+
+  /* --- 间距（4px 栅格） --- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 28px;
+  --space-8: 32px;
+
+  /* --- 描边 --- */
+  --border-width: 1px;
+
+  /* --- 阴影：只用于模态，单层深色，不使用彩色投影 --- */
+  --shadow-modal: 0 16px 40px #07090d;
+
+  /* --- 壳尺寸（1440×900 设计稿） --- */
+  --shell-sider-width: 196px;
+  --shell-header-height: 56px;
+  --shell-content-padding: 28px;
+  --shell-inspector-width: 292px;
+
+  /* --- 动效 --- */
+  --motion-fast: 120ms;
+  --motion-base: 200ms;
+
+  /* --- 遮罩：纯色 + opacity，禁止 rgba --- */
+  --overlay-color: #07090d;
+  --overlay-opacity: 0.8;
+}

@@ -1,11 +1,12 @@
 <script setup lang="ts">
 /**
  * 产物面板（Web 专题 §5.4.4）：六个 Tab（文案 / 图片 / 场景 / 音频 / 时间轴 / 成片）。
- * 数据来自 `GET /api/projects/:id/artifacts` 的产物索引；`copy.json` 与 `timeline.json`
- * 经 `/api/media/*` 拉取后结构化展示（不裸显 JSON）；媒体一律经 `/api/media/*` 相对路径加载。
+ * 数据来自 `GET /api/projects/:id/artifacts` 的产物索引；`copy.json`、`scenes/spec.json`、
+ * `audio/cues.json`、`timeline.json` 经 `/api/media/*` 拉取后按契约 v2 结构化展示（不裸显 JSON）；
+ * 媒体一律经 `/api/media/*` 相对路径加载。
  */
-import { computed, nextTick, onUnmounted, reactive, ref, watch } from "vue";
-import { FileTextOutlined, PlayCircleOutlined } from "@ant-design/icons-vue";
+import { computed, ref, watch } from "vue";
+import { FileTextOutlined } from "@ant-design/icons-vue";
 import { apiRequest } from "../services/api";
 import { getMediaTicket } from "../services/media-ticket";
 import { buildMediaUrl } from "./media-url";
@@ -14,30 +15,120 @@ import { useGenerationStore, type GenerationRecord } from "../stores/generations
 import type { ArtifactEntry, ArtifactIndex } from "../stores/workbench-reducer";
 import type { Project } from "../stores/projects";
 
-/** copy.json 的结构化子集（见 `packages/pipeline/src/copy-contract.ts`）。 */
+/** copy.json v2 的镜头（见 `packages/shared/src/contracts/copy.ts`）。 */
+interface CopyShot {
+  shotId: string;
+  narration: string;
+}
+/** copy.json v2 的叙事段落（章节）。 */
 interface CopyScene {
   sceneId: string;
   title: string;
-  narration: string;
+  shots: CopyShot[];
 }
-/** copy.json 结构化子集。 */
+/** copy.json v2 结构化子集。 */
 interface CopyDoc {
   topic: string;
   style: string;
   title: string;
   scenes: CopyScene[];
 }
-/** timeline.json 的结构化子集（见 `packages/renderer/src/render-frames.ts`）。 */
-interface TimelineEntry {
+
+/** timeline.json v2 的镜头切点（见 `packages/shared/src/contracts/timeline.ts`）。 */
+interface TimelineShot {
+  shotId: string;
   sceneId: string;
   startMs: number;
   endMs: number;
+  durationMs: number;
 }
-/** timeline.json 结构化子集。 */
+/** timeline.json v2 结构化子集。 */
 interface TimelineDoc {
-  entries: TimelineEntry[];
-  totalMs?: number;
+  fps: number;
+  timingSource: string;
+  totalMs: number;
+  shots: TimelineShot[];
+  cues: unknown[];
 }
+
+/** scenes/spec.json（SceneSpec v2）的单镜规格（见 `packages/shared/src/contracts/scene-spec.ts`）。 */
+interface SceneShotSpec {
+  shotId: string;
+  visualType: string;
+  componentId?: string;
+  transition?: { in: string; out: string };
+  animations?: unknown[];
+}
+/** scenes/spec.json 结构化子集。 */
+interface SceneSpecDoc {
+  themeId: string;
+  shots: SceneShotSpec[];
+}
+
+/** audio/cues.json 的镜头音频切点（见 `packages/pipeline/src/audio-cues.ts`）。 */
+interface AudioShot {
+  shotId: string;
+  sceneId: string;
+  audioPath: string;
+  durationMs: number;
+  startMs: number;
+  endMs: number;
+}
+/** audio/cues.json 结构化子集（cue 文本明细由文案/时间轴 Tab 承担，此处只用镜头音频）。 */
+interface AudioCuesDoc {
+  timingSource: string;
+  shots: AudioShot[];
+  cues: unknown[];
+}
+
+/** 时间戳来源中文名（契约 `TIMING_SOURCES`）。 */
+const TIMING_SOURCE_LABELS: Record<string, string> = {
+  "tts-native": "TTS 原生时间戳",
+  "asr-aligned": "ASR 对齐",
+  estimated: "字速估算（降级）",
+};
+/** 镜头视觉类型中文名（契约 `VISUAL_TYPES`）。 */
+const VISUAL_TYPE_LABELS: Record<string, string> = {
+  component: "组件版式",
+  image: "图片",
+  video: "视频",
+  symbol: "符号图形",
+};
+/** 转场类型中文名（契约 `TRANSITION_TYPES`，只允许三型）。 */
+const TRANSITION_LABELS: Record<string, string> = {
+  "hard-cut": "硬切",
+  "title-card": "标题卡",
+  "fade-120": "120ms 淡入",
+};
+
+/**
+ * 把枚举值翻成中文展示名。
+ * @param dict 枚举值 → 中文名
+ * @param value 枚举原值（缺省返回 `-`）
+ * @returns 中文展示名；字典未收录时原样返回
+ */
+function labelOf(dict: Record<string, string>, value: string | undefined): string {
+  if (!value) return "-";
+  return dict[value] ?? value;
+}
+
+/** 时间轴表格列。 */
+const timelineColumns = [
+  { title: "镜头", dataIndex: "shotId", key: "shotId" },
+  { title: "段落", dataIndex: "sceneId", key: "sceneId" },
+  { title: "起始", key: "startMs" },
+  { title: "结束", key: "endMs" },
+  { title: "时长", key: "duration" },
+];
+/** 场景规格表格列。 */
+const sceneColumns = [
+  { title: "镜头", dataIndex: "shotId", key: "shotId" },
+  { title: "视觉类型", key: "visualType" },
+  { title: "组件", key: "componentId" },
+  { title: "转场（入 → 出）", key: "transition" },
+  { title: "动效数", key: "animations" },
+  { title: "操作", key: "actions" },
+];
 
 const props = withDefaults(
   defineProps<{
@@ -56,29 +147,34 @@ const props = withDefaults(
 const emit = defineEmits<{
   /** 当前 Tab 同步。 */
   (event: "update:activeTab", value: string): void;
-  /** 请求对单个场景做定向重生成（父组件写入草稿，交给 Agent 按最小范围执行）。 */
-  (event: "regenerate", payload: { stage: "image" | "scene" | "tts"; sceneId: string }): void;
+  /** 请求对单个镜头做定向重生成（父组件写入草稿，交给 Agent 按最小范围执行）。 */
+  (event: "regenerate", payload: { stage: "image" | "scene" | "tts"; shotId: string }): void;
 }>();
 
 /** 项目生成上下文（提示词 / 模型 / 是否降级）。 */
 const generations = useGenerationStore();
 
-/** 从产物文件名推导场景 ID（`images/s1.png` → `s1`）。 */
-function sceneIdOf(relativePath: string): string {
+/** 从产物文件名推导镜头 ID（v2 每镜一产物，如 `images/sh-001.png` → `sh-001`）。 */
+function shotIdOf(relativePath: string): string {
   return fileName(relativePath).replace(/\.[^.]+$/, "");
 }
 
-/** 取某阶段某场景的最新生成记录。 */
+/** 取某阶段某镜头的最新生成记录。 */
 function generationOf(
   stage: GenerationRecord["stage"],
   relativePath: string,
 ): GenerationRecord | undefined {
-  return generations.find(stage, sceneIdOf(relativePath));
+  return generations.find(stage, shotIdOf(relativePath));
 }
 
-/** 请求定向重生成单个场景产物。 */
+/** 请求定向重生成单个镜头产物。 */
 function requestRegeneration(stage: "image" | "scene" | "tts", relativePath: string): void {
-  emit("regenerate", { stage, sceneId: sceneIdOf(relativePath) });
+  emit("regenerate", { stage, shotId: shotIdOf(relativePath) });
+}
+
+/** 对单个镜头发起场景（版式选型）重生成。 */
+function regenerateScene(shotId: string): void {
+  emit("regenerate", { stage: "scene", shotId });
 }
 
 /** 生成记录里的提示词展示文本（过长时截断，避免撑破弹层）。 */
@@ -95,10 +191,12 @@ const current = computed<string>({
 
 /** copy.json 内容（拉取失败为 null）。 */
 const copyDoc = ref<CopyDoc | null>(null);
+/** scenes/spec.json 内容（拉取失败为 null）。 */
+const sceneDoc = ref<SceneSpecDoc | null>(null);
+/** audio/cues.json 内容（拉取失败为 null）。 */
+const audioDoc = ref<AudioCuesDoc | null>(null);
 /** timeline.json 内容（拉取失败为 null）。 */
 const timelineDoc = ref<TimelineDoc | null>(null);
-/** 音频时长（相对路径 → 秒），由 `<audio>` 元数据加载回填。 */
-const audioDurations = reactive<Record<string, number>>({});
 
 /** 按阶段取产物条目。 */
 function entriesOfStage(stage: string): ArtifactEntry[] {
@@ -110,23 +208,17 @@ function firstEntryOfStage(stage: string): ArtifactEntry | undefined {
   return entriesOfStage(stage)[0];
 }
 
-/** 文案 Tab 的结构化文档是否存在。 */
+/** 文案条目（v2 为单一 `copy.json`）。 */
 const copyEntries = computed(() => entriesOfStage("copy"));
-/** 图片条目（按文件名做数字感知排序，近似 sceneId 顺序）。 */
+/** 场景规格条目（v2 为单一 `scenes/spec.json`）。 */
+const sceneEntry = computed(() => firstEntryOfStage("scene"));
+/** 音频 cue 条目（v2 为单一 `audio/cues.json`）。 */
+const audioEntry = computed(() => firstEntryOfStage("tts"));
+/** 时间轴条目（v2 为单一 `timeline.json`）。 */
+const timelineEntry = computed(() => firstEntryOfStage("storyboard"));
+/** 图片条目（按文件名做数字感知排序，近似镜头顺序）。 */
 const imageEntries = computed(() =>
   [...entriesOfStage("image")].sort((a, b) =>
-    a.relativePath.localeCompare(b.relativePath, "zh-Hans-CN", { numeric: true }),
-  ),
-);
-/** 场景 html 条目。 */
-const sceneEntries = computed(() =>
-  [...entriesOfStage("scene")].sort((a, b) =>
-    a.relativePath.localeCompare(b.relativePath, "zh-Hans-CN", { numeric: true }),
-  ),
-);
-/** 音频条目。 */
-const audioEntries = computed(() =>
-  [...entriesOfStage("tts")].sort((a, b) =>
     a.relativePath.localeCompare(b.relativePath, "zh-Hans-CN", { numeric: true }),
   ),
 );
@@ -147,18 +239,11 @@ const imageItems = computed(() =>
     generation: generationOf("image", entry.relativePath),
   })),
 );
-/** 场景条目 + 各自的生成上下文。 */
-const sceneItems = computed(() =>
-  sceneEntries.value.map((entry) => ({
-    entry,
-    generation: generationOf("scene", entry.relativePath),
-  })),
-);
-/** 音频条目 + 各自的生成上下文。 */
+/** 镜头音频 + 各自的生成上下文。 */
 const audioItems = computed(() =>
-  audioEntries.value.map((entry) => ({
-    entry,
-    generation: generationOf("tts", entry.relativePath),
+  (audioDoc.value?.shots ?? []).map((shot) => ({
+    shot,
+    generation: generationOf("tts", shot.audioPath),
   })),
 );
 
@@ -170,8 +255,6 @@ function fileName(relativePath: string): string {
 
 /** 媒体票据（`<img>` / `<audio>` / `<video>` 等原生标签无法带 Authorization，改用票据）。 */
 const mediaTicket = ref("");
-/** 当前在弹窗中预览的场景路径。 */
-const previewScenePath = ref<string | null>(null);
 
 /** 取（或复用缓存）媒体票据；失败时保持空串，由接口 Bearer 路径兜底。 */
 async function refreshMediaTicket(): Promise<void> {
@@ -187,84 +270,39 @@ function mediaUrl(relativePath: string): string {
   return buildMediaUrl(props.project, relativePath, mediaTicket.value);
 }
 
-/** 构造带自动播放标记的场景预览地址。 */
-function scenePreviewUrl(relativePath: string): string {
-  const url = mediaUrl(relativePath);
-  if (!url) return "";
-  return `${url}${url.includes("?") ? "&" : "?"}preview=1`;
-}
-
-/** 在工作台弹窗中打开场景动画。 */
-function previewScene(relativePath: string): void {
-  previewScenePath.value = relativePath;
-}
-
-/** 关闭场景预览弹窗。 */
-function closeScenePreview(): void {
-  previewScenePath.value = null;
-}
-
-/** 场景预览容器（按容器宽度等比缩放 1920×1080 的场景文档）。 */
-const previewStageEl = ref<HTMLElement | null>(null);
-/** 场景预览缩放比例（容器宽度 / 1920）。 */
-const previewScale = ref(0.475);
-/** 容器尺寸监听器。 */
-let previewObserver: ResizeObserver | null = null;
-
-/** 依据容器实际宽度重算缩放比例，避免只露出场景左上角。 */
-function syncPreviewScale(): void {
-  const width = previewStageEl.value?.clientWidth ?? 0;
-  if (width > 0) previewScale.value = width / 1920;
-}
-
-// 弹窗打开后容器才挂载，挂载完成再按实际宽度缩放并持续跟随尺寸变化
-watch(previewScenePath, async (path) => {
-  previewObserver?.disconnect();
-  previewObserver = null;
-  if (!path) return;
-  await nextTick();
-  syncPreviewScale();
-  if (previewStageEl.value && typeof ResizeObserver !== "undefined") {
-    previewObserver = new ResizeObserver(syncPreviewScale);
-    previewObserver.observe(previewStageEl.value);
-  }
-});
-
-onUnmounted(() => {
-  previewObserver?.disconnect();
-  previewObserver = null;
-});
-
-/** 音频元数据加载后记录时长。 */
-function onAudioMetadata(relativePath: string, event: Event): void {
-  const element = event.target as HTMLAudioElement | null;
-  if (element && Number.isFinite(element.duration)) {
-    audioDurations[relativePath] = element.duration;
+/**
+ * 拉取并解析单个结构化产物。
+ * @param relativePath 项目内相对路径
+ * @param name 展示名（仅用于告警日志）
+ * @returns 解析后的文档；失败返回 null（由调用方决定空态文案）
+ */
+async function fetchDoc<T>(relativePath: string, name: string): Promise<T | null> {
+  try {
+    return await apiRequest<T>(mediaUrl(relativePath));
+  } catch (error) {
+    console.warn(`[web] ${name} 拉取失败`, error);
+    return null;
   }
 }
 
-/** 拉取并结构化 copy.json / timeline.json。 */
+/** 拉取并结构化 copy.json / scenes/spec.json / audio/cues.json / timeline.json。 */
 async function loadDocs(): Promise<void> {
   copyDoc.value = null;
+  sceneDoc.value = null;
+  audioDoc.value = null;
   timelineDoc.value = null;
   if (!props.project) return;
 
-  const copyEntry = firstEntryOfStage("copy");
-  if (copyEntry) {
-    try {
-      copyDoc.value = await apiRequest<CopyDoc>(mediaUrl(copyEntry.relativePath));
-    } catch (error) {
-      console.warn("[web] copy.json 拉取失败", error);
-    }
+  const copy = copyEntries.value[0];
+  if (copy) copyDoc.value = await fetchDoc<CopyDoc>(copy.relativePath, "copy.json");
+  if (sceneEntry.value) {
+    sceneDoc.value = await fetchDoc<SceneSpecDoc>(sceneEntry.value.relativePath, "scenes/spec.json");
   }
-
-  const timelineEntry = firstEntryOfStage("storyboard");
-  if (timelineEntry) {
-    try {
-      timelineDoc.value = await apiRequest<TimelineDoc>(mediaUrl(timelineEntry.relativePath));
-    } catch (error) {
-      console.warn("[web] timeline.json 拉取失败", error);
-    }
+  if (audioEntry.value) {
+    audioDoc.value = await fetchDoc<AudioCuesDoc>(audioEntry.value.relativePath, "audio/cues.json");
+  }
+  if (timelineEntry.value) {
+    timelineDoc.value = await fetchDoc<TimelineDoc>(timelineEntry.value.relativePath, "timeline.json");
   }
 }
 
@@ -292,7 +330,7 @@ watch(
 
 <template>
   <a-tabs v-model:activeKey="current" size="small" class="artifact-tabs">
-    <!-- 文案：文档概要 + 编号分镜列表（对齐设计稿的信息密度） -->
+    <!-- 文案：文档概要 + 章节/镜头列表（对齐设计稿的信息密度） -->
     <a-tab-pane key="copy" tab="文案">
       <div v-if="copyDoc" class="artifact-copy">
         <div class="copy-doc">
@@ -310,11 +348,16 @@ watch(
           </div>
         </dl>
         <ol class="copy-scenes">
-          <li v-for="(item, index) in copyDoc.scenes" :key="item.sceneId">
+          <li v-for="(scene, index) in copyDoc.scenes" :key="scene.sceneId">
             <span class="copy-scene-index">{{ index + 1 }}</span>
             <div class="copy-scene-body">
-              <span class="copy-scene-title">{{ item.title }}</span>
-              <span class="copy-scene-narration">{{ item.narration }}</span>
+              <span class="copy-scene-title">{{ scene.title }}</span>
+              <ul class="copy-shots">
+                <li v-for="shot in scene.shots" :key="shot.shotId">
+                  <span class="copy-shot-id">{{ shot.shotId }}</span>
+                  <span class="copy-scene-narration">{{ shot.narration }}</span>
+                </li>
+              </ul>
             </div>
           </li>
         </ol>
@@ -359,64 +402,57 @@ watch(
       <a-empty v-else description="该产物尚未生成" />
     </a-tab-pane>
 
-    <!-- 场景 -->
+    <!-- 场景：v2 产物为组件选型规格（scenes/spec.json），不再是可预览的 HTML 文档 -->
     <a-tab-pane key="scene" tab="场景">
-      <ul v-if="sceneItems.length > 0" class="scene-list">
-        <li v-for="item in sceneItems" :key="item.entry.relativePath">
-          <span>{{ fileName(item.entry.relativePath) }}</span>
-          <a-button type="link" size="small" @click="previewScene(item.entry.relativePath)">
-            <template #icon><play-circle-outlined /></template>
-            预览动画
-          </a-button>
-          <a :href="scenePreviewUrl(item.entry.relativePath)" target="_blank" rel="noopener">
-            新窗口打开
-          </a>
-          <a-popover trigger="click" placement="top" title="生成信息">
-            <template #content>
-              <div class="gen-info">
-                <p class="gen-line">模型：{{ item.generation?.model ?? "-" }}</p>
-                <p class="gen-line">提示词集：{{ item.generation?.promptSet ?? "-" }}</p>
-                <p class="gen-line">
-                  是否降级：{{ item.generation?.fallback ? "是（内置模板）" : "否" }}
-                </p>
-                <p class="gen-line">生成时间：{{ item.generation?.createdAt ?? "-" }}</p>
-                <pre class="gen-prompt">{{ promptPreview(item.generation) }}</pre>
-              </div>
+      <div v-if="sceneDoc" class="artifact-scene">
+        <p class="scene-meta">
+          主题：{{ sceneDoc.themeId }} · 镜头规格 {{ sceneDoc.shots.length }} 条（组件选型 + 参数）
+        </p>
+        <a-table
+          :data-source="sceneDoc.shots"
+          :pagination="false"
+          size="small"
+          row-key="shotId"
+          :columns="sceneColumns"
+        >
+          <template #bodyCell="{ column, record }">
+            <template v-if="column.key === 'visualType'">{{
+              labelOf(VISUAL_TYPE_LABELS, record.visualType)
+            }}</template>
+            <template v-else-if="column.key === 'componentId'">{{
+              record.componentId ?? "-"
+            }}</template>
+            <template v-else-if="column.key === 'transition'">
+              {{ labelOf(TRANSITION_LABELS, record.transition?.in) }} →
+              {{ labelOf(TRANSITION_LABELS, record.transition?.out) }}
             </template>
-            <a-button type="link" size="small">生成信息</a-button>
-          </a-popover>
-          <a-button
-            type="link"
-            size="small"
-            @click="requestRegeneration('scene', item.entry.relativePath)"
-          >
-            重生成
-          </a-button>
-        </li>
-      </ul>
+            <template v-else-if="column.key === 'animations'">{{
+              record.animations?.length ?? 0
+            }}</template>
+            <template v-else-if="column.key === 'actions'">
+              <a-button type="link" size="small" @click="regenerateScene(record.shotId)">
+                重生成
+              </a-button>
+            </template>
+          </template>
+        </a-table>
+      </div>
+      <a-empty v-else-if="sceneEntry" description="场景规格文件加载失败或格式非法" />
       <a-empty v-else description="该产物尚未生成" />
     </a-tab-pane>
 
-    <!-- 音频 -->
+    <!-- 音频：v2 以 audio/cues.json 的镜头切点为索引，逐镜给出音频地址与实测时长 -->
     <a-tab-pane key="audio" tab="音频">
       <div v-if="audioItems.length > 0" class="audio-list">
-        <div v-for="item in audioItems" :key="item.entry.relativePath" class="audio-item">
-          <span class="audio-name">{{ fileName(item.entry.relativePath) }}</span>
+        <div v-for="item in audioItems" :key="item.shot.shotId" class="audio-item">
+          <span class="audio-name">{{ item.shot.shotId }}</span>
           <audio
             controls
             preload="metadata"
-            :src="mediaUrl(item.entry.relativePath)"
-            :aria-label="`音频 ${fileName(item.entry.relativePath)}`"
-            @loadedmetadata="onAudioMetadata(item.entry.relativePath, $event)"
+            :src="mediaUrl(item.shot.audioPath)"
+            :aria-label="`镜头 ${item.shot.shotId} 配音`"
           />
-          <span class="audio-duration">
-            时长
-            {{
-              audioDurations[item.entry.relativePath]
-                ? formatDurationMs(audioDurations[item.entry.relativePath] * 1000)
-                : "-"
-            }}
-          </span>
+          <span class="audio-duration">时长 {{ formatDurationMs(item.shot.durationMs) }}</span>
           <a-popover trigger="click" placement="top" title="生成信息">
             <template #content>
               <div class="gen-info">
@@ -430,30 +466,30 @@ watch(
           <a-button
             type="link"
             size="small"
-            @click="requestRegeneration('tts', item.entry.relativePath)"
+            @click="requestRegeneration('tts', item.shot.audioPath)"
           >
             重新配音
           </a-button>
         </div>
       </div>
+      <a-empty v-else-if="audioEntry" description="音频 cue 文件加载失败或格式非法" />
       <a-empty v-else description="该产物尚未生成" />
     </a-tab-pane>
 
     <!-- 时间轴 -->
     <a-tab-pane key="timeline" tab="时间轴">
       <div v-if="timelineDoc" class="artifact-timeline">
-        <p class="timeline-total">总时长：{{ formatDurationMs(timelineDoc.totalMs ?? 0) }}</p>
+        <p class="timeline-total">
+          总时长：{{ formatDurationMs(timelineDoc.totalMs) }} · 帧率：{{ timelineDoc.fps }}fps ·
+          时间戳来源：{{ labelOf(TIMING_SOURCE_LABELS, timelineDoc.timingSource) }} ·
+          旁白 cue：{{ timelineDoc.cues?.length ?? 0 }} 条
+        </p>
         <a-table
-          :data-source="timelineDoc.entries"
+          :data-source="timelineDoc.shots"
           :pagination="false"
           size="small"
-          row-key="sceneId"
-          :columns="[
-            { title: '分镜', dataIndex: 'sceneId', key: 'sceneId' },
-            { title: '起始', dataIndex: 'startMs', key: 'startMs' },
-            { title: '结束', dataIndex: 'endMs', key: 'endMs' },
-            { title: '时长', key: 'duration' },
-          ]"
+          row-key="shotId"
+          :columns="timelineColumns"
         >
           <template #bodyCell="{ column, record }">
             <template v-if="column.key === 'startMs'">{{
@@ -462,12 +498,13 @@ watch(
             <template v-else-if="column.key === 'endMs'">{{
               formatDurationMs(record.endMs)
             }}</template>
-            <template v-else-if="column.key === 'duration'">
-              {{ formatDurationMs(record.endMs - record.startMs) }}
-            </template>
+            <template v-else-if="column.key === 'duration'">{{
+              formatDurationMs(record.durationMs)
+            }}</template>
           </template>
         </a-table>
       </div>
+      <a-empty v-else-if="timelineEntry" description="时间轴文件加载失败或格式非法" />
       <a-empty v-else description="该产物尚未生成" />
     </a-tab-pane>
 
@@ -489,36 +526,6 @@ watch(
       <a-empty v-else description="尚未合成" />
     </a-tab-pane>
   </a-tabs>
-
-  <a-modal
-    :open="Boolean(previewScenePath)"
-    :title="previewScenePath ? `场景预览 · ${fileName(previewScenePath)}` : '场景预览'"
-    :footer="null"
-    :width="960"
-    destroy-on-close
-    @cancel="closeScenePreview"
-  >
-    <div v-if="previewScenePath" class="scene-preview">
-      <!--
-        场景 HTML 的相对资源（../vendor/gsap.min.js、../images/*.png）依赖 vf_media Cookie 鉴权，
-        若只给 allow-scripts，iframe 会成为不透明源、子资源请求丢失 Cookie，动画时间轴无法创建。
-        因此必须同时放行 allow-same-origin；其余能力（弹窗、表单、顶层跳转）仍被禁用。
-      -->
-      <div
-        ref="previewStageEl"
-        class="scene-preview-stage"
-        :style="{ '--scene-preview-scale': previewScale }"
-      >
-        <iframe
-          :key="previewScenePath"
-          :src="scenePreviewUrl(previewScenePath)"
-          :title="`场景动画预览：${fileName(previewScenePath)}`"
-          class="scene-preview-frame"
-          sandbox="allow-scripts allow-same-origin"
-        />
-      </div>
-    </div>
-  </a-modal>
 </template>
 
 <style scoped>
@@ -610,6 +617,29 @@ watch(
   font-weight: 600;
 }
 
+/* 章节下的镜头：镜头号 + 口播文本 */
+.copy-shots {
+  display: flex;
+  margin: 0;
+  padding: 0;
+  flex-direction: column;
+  gap: 2px;
+  list-style: none;
+}
+
+.copy-shots li {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.copy-shot-id {
+  flex: none;
+  color: var(--vf-text-tertiary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
 .copy-scene-narration {
   color: var(--vf-text-secondary);
   font-size: 12px;
@@ -660,53 +690,16 @@ watch(
   word-break: break-word;
 }
 
-.scene-list {
+.artifact-scene {
   display: flex;
-  margin: 0;
-  padding: 0;
   flex-direction: column;
-  gap: 4px;
-  list-style: none;
+  gap: 8px;
 }
 
-.scene-list li {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 4px;
-}
-
-.scene-list li > span {
-  min-width: 60px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.scene-preview {
-  overflow: hidden;
-  border-radius: var(--vf-radius-sm);
-  background: #0b1020;
-}
-
-/* 场景文档固定 1920×1080，用 transform 等比缩放避免只露出左上角 */
-.scene-preview-stage {
-  position: relative;
-  width: 100%;
-  aspect-ratio: 16 / 9;
-  overflow: hidden;
-}
-
-.scene-preview-frame {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 1920px;
-  height: 1080px;
-  border: 0;
-  background: #0b1020;
-  transform: scale(var(--scene-preview-scale, 0.5));
-  transform-origin: top left;
+.scene-meta {
+  margin: 0;
+  color: var(--vf-text-secondary);
+  font-size: 12px;
 }
 
 .audio-list {

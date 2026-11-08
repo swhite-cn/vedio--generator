@@ -31,6 +31,15 @@ const expanded = ref(false);
 /** 已展开详情的工具调用 id 集合。 */
 const openRows = ref<Set<string>>(new Set());
 
+/** 单个工具失败时的 trace 目标（T307 新路由；无项目上下文回退旧路由）。 */
+function tracePathOf(stage?: string | null): string {
+  const base =
+    props.project?.id && props.runId
+      ? `/projects/${props.project.id}/runs/${props.runId}`
+      : `/runs/${props.runId ?? ""}/trace`;
+  return stage ? `${base}?stage=${encodeURIComponent(stage)}` : base;
+}
+
 /** 组内是否有运行中的工具。 */
 const running = computed(() => props.items.some((item) => item.tool?.status === "running"));
 
@@ -165,7 +174,7 @@ function artifactUrl(path: string): string {
             失败原因：{{ item.tool.errorCode ?? "未知错误" }}
             <router-link
               v-if="runId"
-              :to="{ path: `/runs/${runId}/trace`, query: { stage: item.tool.stage ?? '' } }"
+              :to="tracePathOf(item.tool.stage)"
             >
               查看 trace
             </router-link>

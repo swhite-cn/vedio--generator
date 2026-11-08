@@ -36,7 +36,7 @@ assets:
   max_message_refs: 12
 
 tools:
-  # Chromium 可执行文件路径；留空时由 Playwright 自动管理浏览器。
+  # Chromium 可执行文件路径；留空时由 Remotion 自动解析或下载浏览器。
   chromium_path: ""
   # ffmpeg 命令或完整可执行文件路径；需可被服务进程访问。
   ffmpeg_path: "ffmpeg"

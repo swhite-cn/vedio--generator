@@ -30,24 +30,26 @@ export const INTERRUPTED_TOOLTIP = "服务重启导致中断，可续跑";
 /** `skipped` 阶段的固定 Tooltip 文案。 */
 export const SKIPPED_TOOLTIP = "产物已存在，本次跳过";
 
-/** 七阶段中文名（Web 专题 §2.3 固定命名）。 */
+/** 八阶段中文名（与 `PIPELINE_STAGES` 顺序一致；旧七阶段 run 的 `captions` 显示为待执行）。 */
 export const STAGE_LABELS: Readonly<Record<string, string>> = {
   copy: "文案",
   image: "配图",
   scene: "场景",
   tts: "配音",
+  captions: "字幕",
   storyboard: "时间轴",
   render: "渲染",
   compose: "合成",
 };
 
-/** 工具中文名映射（Web 专题 §5.4.2 工具调用卡片头部）。覆盖七个阶段工具与内置工具。 */
+/** 工具中文名映射（Web 专题 §5.4.2 工具调用卡片头部）。覆盖八个阶段工具与内置工具。 */
 export const TOOL_LABELS: Readonly<Record<string, string>> = {
   // 阶段工具（与 `apps/server/src/workflow/capabilities.ts` 的 STAGE_TOOL_AND_LABEL 一致）
   copy_generate: "文案生成",
   image_generate: "配图生成",
   scene_generate: "场景生成",
   tts_generate: "语音合成",
+  captions_generate: "字幕生成",
   storyboard_generate: "时间轴生成",
   render_frames: "逐帧渲染",
   compose_video: "视频合成",
@@ -146,4 +148,79 @@ export function statusTooltip(
     return SKIPPED_TOOLTIP;
   }
   return "";
+}
+
+/** VfPill 语义色调（方案 §8.6 基元）。 */
+export type PillTone = "neutral" | "accent" | "success" | "danger" | "warning" | "info" | "teal";
+
+/**
+ * 把 AntD 语义色映射为 VfPill tone（新 UI 不再使用 Tag 颜色字符串）。
+ * @param color 状态映射返回的 AntD 颜色
+ * @returns VfPill tone
+ */
+export function statusTone(color: TagColor): PillTone {
+  switch (color) {
+    case "success":
+      return "success";
+    case "error":
+      return "danger";
+    case "warning":
+      return "warning";
+    case "processing":
+      return "accent";
+    default:
+      return "neutral";
+  }
+}
+
+/**
+ * 把 ISO 时间戳格式化为 `MM-DD HH:mm`（本地时区）。
+ * @param iso 服务端时间戳；空值或非法值返回 "—"
+ * @returns 展示用时间文案
+ */
+export function formatDateTime(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const parsed = Date.parse(iso);
+  if (!Number.isFinite(parsed)) return "—";
+  const date = new Date(parsed);
+  const pad = (value: number): string => String(value).padStart(2, "0");
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(
+    date.getMinutes(),
+  )}`;
+}
+
+/**
+ * 计算并格式化一段耗时（毫秒），形如 `1m 23s` / `45s`。
+ * 缺任一时间戳或结束早于开始时返回 "—"（运行中不显示推测时长）。
+ * @param startIso 开始时间戳
+ * @param endIso 结束时间戳
+ * @returns 展示用耗时文案
+ */
+export function formatElapsed(
+  startIso: string | null | undefined,
+  endIso: string | null | undefined,
+): string {
+  if (!startIso || !endIso) return "—";
+  const start = Date.parse(startIso);
+  const end = Date.parse(endIso);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return "—";
+  const totalSeconds = Math.round((end - start) / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+}
+
+/**
+ * 把毫秒格式化为人可读时长（`4:51`）。
+ * @param ms 毫秒；空值或非正数返回 "—"
+ * @returns 展示用时长文案（不足 1 小时为 `m:ss`，超过为 `h:mm:ss`）
+ */
+export function formatMediaDuration(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined || !Number.isFinite(ms) || ms <= 0) return "—";
+  const totalSeconds = Math.round(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const pad = (value: number): string => String(value).padStart(2, "0");
+  return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${minutes}:${pad(seconds)}`;
 }

@@ -1,0 +1,8 @@
+{
+  "componentId": "progress-ring",
+  "props": {
+    "label": "测序完成度",
+    "percent": 76,
+    "caption": "人类基因组计划 · 2003"
+  }
+}

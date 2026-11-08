@@ -1,0 +1,72 @@
+{
+  "generatedAt": "2026-11-08T03:59:54.975Z",
+  "runtime": {
+    "node": "v24.21.0",
+    "platform": "win32",
+    "cpuModel": "Intel(R) Core(TM) 5 220H",
+    "cpuCount": 16,
+    "totalMemoryGB": 31.5
+  },
+  "sample": {
+    "shotCount": 78,
+    "sceneCount": 13,
+    "cueCount": 98,
+    "shotMs": 3730,
+    "totalMs": 290940,
+    "fps": 30,
+    "profile": "LANDSCAPE_1080P",
+    "composition": "v2：7 类组件轮换（复用预览 fixture props，无 image/symbol 镜头）"
+  },
+  "measurements": {
+    "v2Full": {
+      "concurrency": 4,
+      "totalFrames": 8658,
+      "framesPerShot": 111,
+      "elapsedMs": 510346,
+      "framesPerSec": 17,
+      "note": "含一次 bundle（Remotion webpack 编译）"
+    },
+    "v2Regen": {
+      "shotIds": [
+        "sh-001"
+      ],
+      "totalFrames": 111,
+      "elapsedMs": 7724,
+      "note": "单镜重渲（含一次 bundle）；对比 v2AvgMsPerShotFull 得帧复用收益"
+    },
+    "v2Concurrency": {
+      "shots": 4,
+      "note": "每档独立 bundle，帧率含 bundle 开销，看相对趋势而非绝对值",
+      "runs": [
+        {
+          "concurrency": 1,
+          "totalFrames": 444,
+          "elapsedMs": 26068,
+          "framesPerSec": 17
+        },
+        {
+          "concurrency": 2,
+          "totalFrames": 444,
+          "elapsedMs": 25192,
+          "framesPerSec": 18
+        },
+        {
+          "concurrency": 4,
+          "totalFrames": 444,
+          "elapsedMs": 26925,
+          "framesPerSec": 16
+        },
+        {
+          "concurrency": 6,
+          "totalFrames": 444,
+          "elapsedMs": 29090,
+          "framesPerSec": 15
+        }
+      ]
+    }
+  },
+  "derived": {
+    "v2AvgMsPerShotFull": 6543,
+    "regenSpeedupVsFullAvg": 0.85
+  }
+}

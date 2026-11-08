@@ -30,6 +30,11 @@ const NAMED_EVENT_TYPES = [
   "run_stage",
   "review_gate",
   "run_end",
+  // 方案 §7.2 增量四类（T119 服务端类型；前端在此订阅）
+  "shot.updated",
+  "quality.updated",
+  "asset.bound",
+  "preview.ready",
   "resync",
   "error",
 ] as const;

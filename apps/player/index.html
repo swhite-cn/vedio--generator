@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>VideoForge 预览</title>
+    <style>
+      html,
+      body,
+      #root {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: #101216;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- 失败兜底：bundle 加载失败（网络/路径错误）时也不白屏 -->
+    <noscript>预览播放器需要启用 JavaScript。</noscript>
+    <div id="root"></div>
+    <!-- __PLAYER_DATA__ 由服务端 HTML 入口动态注入（本文件仅作 vite 构建模板） -->
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

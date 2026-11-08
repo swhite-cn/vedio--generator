@@ -17,6 +17,7 @@ import {
   updateLastLogin,
   updatePassword,
 } from "../../db/repositories/user-repository.js";
+import { createLoginEvent } from "../../db/repositories/login-event-repository.js";
 
 /**
  * 鉴权与用户路由（见设计文档 §4.2、§8.1）。
@@ -112,7 +113,30 @@ export function registerAuthRoutes(app: FastifyInstance, deps: HttpDeps): void {
     const username = typeof body.username === "string" ? body.username : "";
     const password = typeof body.password === "string" ? body.password : "";
 
+    /**
+     * 追加登录日志；失败仅记 warn，不影响登录主流程。
+     * @param ok 是否成功
+     * @param reason 失败原因（成功为空）
+     * @param userId 命中用户 id（失败为空）
+     */
+    const recordLogin = (ok: boolean, reason: string | null, userId: string | null): void => {
+      try {
+        createLoginEvent(deps.db, {
+          userId,
+          username,
+          ok,
+          reason,
+          ip: request.ip ?? null,
+          userAgent:
+            typeof request.headers["user-agent"] === "string" ? request.headers["user-agent"] : null,
+        });
+      } catch (error) {
+        app.log.warn({ err: error }, "[http] 写入登录事件失败");
+      }
+    };
+
     if (getThrottleStatus(username).throttled) {
+      recordLogin(false, "THROTTLED", null);
       throw new VideoForgeError("AUTH_INVALID", "用户名或密码错误");
     }
 
@@ -120,11 +144,13 @@ export function registerAuthRoutes(app: FastifyInstance, deps: HttpDeps): void {
     const matched = user ? passwordMatches(password, user.password_hash) : false;
     if (!user || !matched) {
       registerLoginFailure(username);
+      recordLogin(false, "INVALID_CREDENTIALS", null);
       throw new VideoForgeError("AUTH_INVALID", "用户名或密码错误");
     }
 
     clearLoginFailures(username);
     updateLastLogin(deps.db, user.id);
+    recordLogin(true, null, user.id);
     const token = signAccessToken(app, user);
     app.log.info({ userId: user.id }, "[http] 用户登录成功");
     reply.code(200);

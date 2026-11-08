@@ -5,9 +5,18 @@ import { dirname, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 import type { FastifyInstance } from "fastify";
 import { latestGenerationRecords } from "@videoforge/pipeline";
-import type { ProjectAssetKind, ProjectAssetSource } from "@videoforge/shared";
+import {
+  PROJECT_VISUAL_CATEGORIES,
+  type ProjectAssetKind,
+  type ProjectAssetSource,
+  type ProjectVisualCategory,
+} from "@videoforge/shared";
 import { VideoForgeError } from "@videoforge/shared";
 import { resolveUserProjectDir } from "../../domain/storage-layout.js";
+import {
+  assetBindingCounts,
+  parseVisualCategory,
+} from "../../domain/asset-binding.js";
 import {
   assertUploadSize,
   classifyUpload,
@@ -64,18 +73,22 @@ function parseKind(value: unknown): ProjectAssetKind | undefined {
 export function registerAssetRoutes(app: FastifyInstance, deps: HttpDeps): void {
   const authPreHandler = createAuthPreHandler(app);
 
-  /** 列出当前 actor 指定项目的资产。 */
+  /** 列出当前 actor 指定项目的资产（6 类筛选 + 由 copy v2 计算的绑定镜头数）。 */
   app.get("/api/projects/:id/assets", { preHandler: authPreHandler }, async (request) => {
     const actor = requireActor(request);
     const projectId = (request.params as { id: string }).id;
-    const query = request.query as { kind?: unknown; source?: unknown };
+    const query = request.query as {
+      kind?: unknown;
+      source?: unknown;
+      visualCategory?: unknown;
+    };
     const project = getProject(deps.db, actor, projectId);
     if (!project) {
       throw new VideoForgeError("AUTH_FORBIDDEN", "项目不存在或无访问权限");
     }
+    const projectDir = resolveUserProjectDir(deps.storageRoot, actor.userId, project.name);
     const capability = getCapability(project.capability_id);
     if (capability) {
-      const projectDir = resolveUserProjectDir(deps.storageRoot, actor.userId, project.name);
       syncGeneratedProjectAssets(
         deps.db,
         actor,
@@ -83,11 +96,18 @@ export function registerAssetRoutes(app: FastifyInstance, deps: HttpDeps): void 
         buildArtifactIndex(projectDir, capability, project.profile),
       );
     }
+    const bindings = assetBindingCounts(projectDir);
+    const items = listProjectAssets(deps.db, actor, projectId, {
+      kind: parseKind(query.kind),
+      source: parseSource(query.source),
+      visualCategory: parseVisualCategory(query.visualCategory),
+    });
     return {
-      items: listProjectAssets(deps.db, actor, projectId, {
-        kind: parseKind(query.kind),
-        source: parseSource(query.source),
-      }),
+      categories: PROJECT_VISUAL_CATEGORIES,
+      items: items.map((asset) => ({
+        ...asset,
+        boundShots: bindings[asset.id] ?? 0,
+      })),
     };
   });
 

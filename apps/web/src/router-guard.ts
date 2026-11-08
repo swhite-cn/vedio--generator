@@ -37,8 +37,8 @@ export interface NavigationDecision {
 const LOGIN_PATH = "/login";
 /** 个人设置页路径（首次改密强制落地）。 */
 const SETTINGS_PATH = "/settings";
-/** 登录后的默认落地页。 */
-const DEFAULT_PATH = "/projects";
+/** 登录后的默认落地页（方案 §8.4：能力中心为 `/` 默认首页）。 */
+const DEFAULT_PATH = "/";
 
 /**
  * 判断路径是否命中某具体页（精确匹配或带查询串）。

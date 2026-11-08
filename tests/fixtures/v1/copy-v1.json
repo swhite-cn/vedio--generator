@@ -1,0 +1,25 @@
+{
+  "topic": "黑洞是什么",
+  "style": "科普、克制",
+  "title": "黑洞不是洞",
+  "scenes": [
+    {
+      "sceneId": "s1",
+      "title": "引入",
+      "narration": "黑洞不是洞，而是一块被压到极致的时空。",
+      "imagePrompt": "深空中的黑洞插画，无文字"
+    },
+    {
+      "sceneId": "s2",
+      "title": "形成",
+      "narration": "当大质量恒星耗尽燃料，核心会在自身引力下坍缩。",
+      "imagePrompt": "恒星坍缩的示意插画，无文字"
+    },
+    {
+      "sceneId": "s3",
+      "title": "边界",
+      "narration": "越过事件视界，连光也无法逃逸。",
+      "imagePrompt": "事件视界与光线弯曲的示意插画，无文字"
+    }
+  ]
+}

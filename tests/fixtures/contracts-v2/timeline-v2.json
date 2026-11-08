@@ -1,0 +1,49 @@
+{
+  "contractVersion": "2.0",
+  "fps": 30,
+  "tailPauseMs": 500,
+  "timingSource": "tts-native",
+  "totalMs": 6500,
+  "shots": [
+    {
+      "shotId": "sh-001",
+      "sceneId": "s1",
+      "startMs": 0,
+      "endMs": 3120,
+      "durationMs": 3120
+    },
+    {
+      "shotId": "sh-002",
+      "sceneId": "s1",
+      "startMs": 3120,
+      "endMs": 6000,
+      "durationMs": 2880
+    }
+  ],
+  "cues": [
+    {
+      "cueId": "cue-0001",
+      "shotId": "sh-001",
+      "kind": "narration",
+      "startMs": 120,
+      "endMs": 2960,
+      "text": "把水银原子核里的质子敲掉一个，它就变成了黄金。"
+    },
+    {
+      "cueId": "cue-0002",
+      "shotId": "sh-001",
+      "kind": "animation",
+      "atMs": 480,
+      "durationMs": 480,
+      "effect": "underline-sweep"
+    },
+    {
+      "cueId": "cue-0003",
+      "shotId": "sh-002",
+      "kind": "narration",
+      "startMs": 3260,
+      "endMs": 5900,
+      "text": "这不是炼金术，是核物理。"
+    }
+  ]
+}

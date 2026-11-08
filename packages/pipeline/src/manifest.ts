@@ -30,6 +30,8 @@ export interface GenerationRecord {
   stage: GenerationStage;
   /** 场景 ID；整篇类产物（copy）缺省。 */
   sceneId?: string;
+  /** 镜头 ID（v2）；用于按镜头建立版本链。 */
+  shotId?: string;
   /** 产物相对项目目录的路径（POSIX `/`），如 `images/s1.png`。 */
   assetPath?: string;
   /** 实际调用的模型 ID 或资源 ID。 */
@@ -56,6 +58,8 @@ export interface GenerationRecord {
   durationMs?: number;
   /** 覆盖掉的上一条同类记录 ID（版本链）。 */
   supersedesId?: string;
+  /** 生成时生效的契约版本；旧记录缺省按 `1.0` 读取。 */
+  contractVersion?: string;
   /** 记录时间（ISO 8601）。 */
   createdAt: string;
 }
@@ -86,7 +90,10 @@ export function readGenerationRecords(projectDir: string): GenerationRecord[] {
     if (trimmed.length === 0) continue;
     try {
       const parsed = JSON.parse(trimmed) as GenerationRecord;
-      if (parsed && typeof parsed.id === "string") records.push(parsed);
+      if (parsed && typeof parsed.id === "string") {
+        // 旧记录没有契约版本字段，读取时归一化为 1.0，避免下游出现 undefined
+        records.push({ ...parsed, contractVersion: parsed.contractVersion ?? "1.0" });
+      }
     } catch {
       // 损坏行按缺失处理：审计数据不应阻断生成主流程
     }
@@ -107,10 +114,11 @@ function findPrevious(
   for (let index = records.length - 1; index >= 0; index -= 1) {
     const record = records[index];
     if (record.stage !== input.stage) continue;
-    if (input.sceneId ? record.sceneId === input.sceneId : true) {
-      if (input.assetPath && record.assetPath && record.assetPath !== input.assetPath) continue;
-      return record;
-    }
+    if (input.shotId && record.shotId !== input.shotId) continue;
+    // 非镜头记录仍按场景匹配；整篇记录（copy）不限制场景
+    if (!input.shotId && input.sceneId && record.sceneId !== input.sceneId) continue;
+    if (input.assetPath && record.assetPath && record.assetPath !== input.assetPath) continue;
+    return record;
   }
   return undefined;
 }
@@ -130,6 +138,7 @@ export function appendGenerationRecord(
   const record: GenerationRecord = {
     ...input,
     id: randomUUID(),
+    contractVersion: input.contractVersion ?? "1.0",
     createdAt: new Date().toISOString(),
     ...(previous ? { supersedesId: previous.id } : {}),
     ...(input.prompt ? { promptSha256: sha256(input.prompt) } : {}),
@@ -155,7 +164,7 @@ export function appendGenerationRecord(
 export function latestGenerationRecords(projectDir: string): GenerationRecord[] {
   const latest = new Map<string, GenerationRecord>();
   for (const record of readGenerationRecords(projectDir)) {
-    const key = `${record.stage}:${record.assetPath ?? record.sceneId ?? ""}`;
+    const key = `${record.stage}:${record.assetPath ?? record.shotId ?? record.sceneId ?? ""}`;
     latest.set(key, record);
   }
   return [...latest.values()];

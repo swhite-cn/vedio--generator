@@ -4,5 +4,6 @@
 export const WORKSPACE_NAME = "videoforge";
 
 export * from "./capability.js";
+export * from "./contracts/index.js";
 export * from "./domain.js";
 export * from "./errors.js";

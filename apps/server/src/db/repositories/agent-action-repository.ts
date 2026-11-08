@@ -58,6 +58,8 @@ export function createAgentAction(
     kind: AgentActionKind;
     status: AgentActionStatus;
     plan: unknown;
+    /** 关联 run ID；镜头重生成在创建 run 后回填。 */
+    runId?: string | null;
   },
 ): AgentAction {
   if (!ownsMessage(db, actor, input.sessionId, input.messageId, input.projectId)) {
@@ -72,13 +74,40 @@ export function createAgentAction(
     kind: input.kind,
     status: input.status,
     planJson: JSON.stringify(input.plan),
-    runId: null,
+    runId: input.runId ?? null,
     errorCode: null,
     createdAt: now,
     updatedAt: now,
   };
   db.insert(agentActions).values(row).run();
   return toAgentAction(row);
+}
+
+/**
+ * 回填动作关联的 run ID（镜头重生成先建动作、再建 run 的补偿步骤）。
+ * @param db Drizzle 数据库实例
+ * @param actor 请求主体
+ * @param actionId 动作 ID
+ * @param runId run ID
+ * @returns 更新后的动作
+ * @throws VideoForgeError(`ACTION_NOT_CONFIRMABLE`) 动作不存在或无权访问
+ */
+export function updateAgentActionRun(
+  db: any,
+  actor: Actor,
+  actionId: string,
+  runId: string,
+): AgentAction {
+  const action = getAgentAction(db, actor, actionId);
+  if (!action) {
+    throw new VideoForgeError("ACTION_NOT_CONFIRMABLE", "动作不存在或无访问权限");
+  }
+  const now = new Date().toISOString();
+  db.update(agentActions)
+    .set({ runId, updatedAt: now })
+    .where(eq(agentActions.id, actionId))
+    .run();
+  return { ...action, run_id: runId, updated_at: now };
 }
 
 /** 获取当前 actor 可见的 Agent 动作。 */

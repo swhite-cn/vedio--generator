@@ -15,7 +15,7 @@ import type { Project } from "./projects";
 import {
   applyEvent,
   createInitialState,
-  sevenStages,
+  stagePlaceholders,
   toStageProgress,
   type ArtifactIndex,
   type RunSummary,
@@ -381,7 +381,7 @@ export const useWorkbenchStore = defineStore("workbench", () => {
       state.value = {
         ...state.value,
         currentRun: result.run,
-        stages: sevenStages(),
+        stages: stagePlaceholders(),
         finalReady: false,
       };
       await refreshRun();

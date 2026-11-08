@@ -1,0 +1,35 @@
+{
+  "contractVersion": "2.0",
+  "themeId": "documentary-dark",
+  "shots": [
+    {
+      "shotId": "sh-001",
+      "visualType": "component",
+      "componentId": "keyword-block",
+      "props": {
+        "title": "水银 → 黄金",
+        "subtitle": "原子核里只少一个质子",
+        "underline": "sweep"
+      },
+      "assetRefs": [{ "assetId": "ast-anchor-mercury", "role": "symbol" }],
+      "transition": { "in": "hard-cut", "out": "hard-cut" },
+      "animations": [
+        { "effect": "title-in", "atMs": 0, "durationMs": 520 },
+        { "effect": "underline-sweep", "atMs": 480, "durationMs": 480 }
+      ],
+      "source": { "label": "CERN 公开资料" }
+    },
+    {
+      "shotId": "sh-002",
+      "visualType": "image",
+      "props": {},
+      "assetRefs": [
+        { "assetId": "ast-lab-hq", "role": "background" },
+        { "assetId": "ast-anchor-mercury", "role": "symbol" }
+      ],
+      "transition": { "in": "fade-120", "out": "hard-cut" },
+      "animations": [],
+      "source": null
+    }
+  ]
+}

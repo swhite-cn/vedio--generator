@@ -22,6 +22,8 @@ function toProject(row: any): Project {
     topic: row.topic,
     style: row.style ?? null,
     profile: row.profile,
+    theme_id: row.themeId ?? null,
+    contract_version: row.contractVersion ?? "1.0",
     status: row.status as ProjectStatus,
     created_at: row.createdAt,
     updated_at: row.updatedAt,
@@ -61,6 +63,10 @@ export interface CreateProjectInput {
   topic: string;
   style?: string | null;
   profile: string;
+  /** 项目主题 ID；v2 项目必填，旧调用方可省略。 */
+  themeId?: string | null;
+  /** 契约版本；默认 `1.0`，v2 项目由创建入口显式传 `2.0`。 */
+  contractVersion?: string;
   status?: ProjectStatus;
 }
 
@@ -81,6 +87,8 @@ export function createProject(db: any, actor: Actor, input: CreateProjectInput):
     topic: input.topic,
     style: input.style ?? null,
     profile: input.profile,
+    themeId: input.themeId ?? null,
+    contractVersion: input.contractVersion ?? "1.0",
     status: input.status ?? "draft",
     createdAt: now,
     updatedAt: now,

@@ -11,7 +11,7 @@
 /** 每个会话保留的最近事件条数（见设计文档 §4.4）。 */
 export const EVENT_BUFFER_SIZE = 200;
 
-/** 全部 SSE 事件类型（逐字照搬设计文档 §4.4，顺序即定义顺序）。 */
+/** 全部 SSE 事件类型（设计文档 §4.4 十类 + 方案 §7.2 增量四类，顺序即定义顺序）。 */
 export const SSE_EVENT_TYPES = [
   "text_delta",
   "thinking_delta",
@@ -23,6 +23,15 @@ export const SSE_EVENT_TYPES = [
   "review_gate",
   "run_end",
   "agent_action",
+  // —— 方案 §7.2 增量（T119）——
+  // 镜头参数/产物变更（PATCH /shots/:shotId 成功后发布；重生成发布点随 T204）
+  "shot.updated",
+  // 质检完成（发布点随 T207 质检接入引擎后启用）
+  "quality.updated",
+  // 资产绑定变化（发布点随 T204 image 回填后启用）
+  "asset.bound",
+  // 预览帧/片段可用（发布点随 T204/T208 播放器后启用）
+  "preview.ready",
   "resync",
   "error",
 ] as const;

@@ -13,7 +13,7 @@ import { STAGE_LABELS } from "../components/state-mapping";
 // 视图模型
 // ---------------------------------------------------------------------------
 
-/** 七阶段固定顺序（与 `STAGE_LABELS` 的键顺序一致，见 Web 专题 §2.3）。 */
+/** 八阶段固定顺序（由 `STAGE_LABELS` 键顺序决定，含 `captions`）。 */
 export const STAGE_ORDER: readonly string[] = Object.keys(STAGE_LABELS);
 
 /** 前端使用的 run 视图（字段与服务端 `runs` 表一致）。 */
@@ -134,6 +134,10 @@ export interface WorkbenchState {
   needsResync: boolean;
   /** 产物刷新令牌：`tool_end`/`run_stage(done)`/`run_end(done)` 时自增，store 据此局部刷新产物面板。 */
   artifactRefreshToken: number;
+  /** 分镜刷新令牌：`shot.updated`/`asset.bound` 时自增，分镜/资产面板据此重拉聚合数据。 */
+  storyboardRefreshToken: number;
+  /** 质检刷新令牌：`quality.updated` 时自增，质检卡据此重拉报告。 */
+  qualityRefreshToken: number;
   /** run 是否已完成（成功时产物面板自动切到「成片」Tab）。 */
   finalReady: boolean;
 }
@@ -143,10 +147,10 @@ export interface WorkbenchState {
 // ---------------------------------------------------------------------------
 
 /**
- * 构造七阶段「全部待执行」的初始阶段进度。
- * @returns 按固定顺序排列的 7 条 `pending` 阶段
+ * 构造八阶段「全部待执行」的初始阶段进度。
+ * @returns 按固定顺序排列的 8 条 `pending` 阶段
  */
-export function sevenStages(): StageProgress[] {
+export function stagePlaceholders(): StageProgress[] {
   return STAGE_ORDER.map((stage) => ({
     stage,
     status: "pending",
@@ -166,7 +170,7 @@ export function createInitialState(): WorkbenchState {
     project: null,
     session: null,
     currentRun: null,
-    stages: sevenStages(),
+    stages: stagePlaceholders(),
     artifacts: null,
     messages: [],
     connection: "connected",
@@ -174,6 +178,8 @@ export function createInitialState(): WorkbenchState {
     lastError: null,
     needsResync: false,
     artifactRefreshToken: 0,
+    storyboardRefreshToken: 0,
+    qualityRefreshToken: 0,
     finalReady: false,
   };
 }
@@ -201,7 +207,7 @@ function blankRun(id: string): RunSummary {
 /**
  * 把服务端阶段行转成阶段进度；缺失的 pending 阶段按固定顺序补齐。
  * @param rows 服务端 `run_stages` 行（字段已为 snake_case）
- * @returns 恒为 7 条的阶段进度数组
+ * @returns 恒为 8 条的阶段进度数组（旧七阶段 run 的 `captions` 为 pending）
  */
 export function toStageProgress(
   rows: Array<{
@@ -407,7 +413,7 @@ function applyRunStart(state: WorkbenchState, data: Record<string, unknown>): Wo
   let stages =
     sameRun && state.stages.length === STAGE_ORDER.length
       ? state.stages.map((s) => ({ ...s }))
-      : sevenStages();
+      : stagePlaceholders();
   if (fromStage) {
     const fromIndex = STAGE_ORDER.indexOf(fromStage);
     if (fromIndex > 0) {
@@ -443,7 +449,7 @@ function applyRunStage(state: WorkbenchState, data: Record<string, unknown>): Wo
   const startedAt = typeof data.startedAt === "string" ? data.startedAt : undefined;
   const endedAt = typeof data.endedAt === "string" ? data.endedAt : undefined;
 
-  const stages = (state.stages.length === STAGE_ORDER.length ? state.stages : sevenStages()).map(
+  const stages = (state.stages.length === STAGE_ORDER.length ? state.stages : stagePlaceholders()).map(
     (item) =>
       item.stage === stage
         ? {
@@ -556,12 +562,49 @@ function applyResync(state: WorkbenchState): WorkbenchState {
   return {
     ...state,
     currentRun: null,
-    stages: sevenStages(),
+    stages: stagePlaceholders(),
     artifacts: null,
     messages: [],
     agentStreaming: false,
     needsResync: true,
     finalReady: false,
+  };
+}
+
+/**
+ * `shot.updated`：镜头参数或产物变更，分镜/产物面板需要重拉。
+ * @param state 当前状态
+ * @returns 新状态
+ */
+function applyShotUpdated(state: WorkbenchState): WorkbenchState {
+  return {
+    ...state,
+    storyboardRefreshToken: state.storyboardRefreshToken + 1,
+    artifactRefreshToken: state.artifactRefreshToken + 1,
+  };
+}
+
+/**
+ * `quality.updated`：质检报告更新，质检卡重拉。
+ * @param state 当前状态
+ * @returns 新状态
+ */
+function applyQualityUpdated(state: WorkbenchState): WorkbenchState {
+  return {
+    ...state,
+    qualityRefreshToken: state.qualityRefreshToken + 1,
+  };
+}
+
+/**
+ * `asset.bound`：资产绑定计数变化，分镜与资产面板重拉。
+ * @param state 当前状态
+ * @returns 新状态
+ */
+function applyAssetBound(state: WorkbenchState): WorkbenchState {
+  return {
+    ...state,
+    storyboardRefreshToken: state.storyboardRefreshToken + 1,
   };
 }
 
@@ -594,6 +637,15 @@ export function applyEvent(state: WorkbenchState, frame: SseFrame): WorkbenchSta
       return applyRunEnd(state, data);
     case "resync":
       return applyResync(state);
+    case "shot.updated":
+      return applyShotUpdated(state);
+    case "quality.updated":
+      return applyQualityUpdated(state);
+    case "asset.bound":
+      return applyAssetBound(state);
+    case "preview.ready":
+      // 预览帧可用由播放器 postMessage 自行处理；此处不推进工作台状态
+      return state;
     case "error":
       return {
         ...state,

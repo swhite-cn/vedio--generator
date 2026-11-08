@@ -14,23 +14,23 @@ import { createAgentTools } from "../../apps/server/src/agent/tools/index";
 import { withToolTrace } from "../../apps/server/src/agent/tools/tool-trace";
 
 // 组合测试会触达阶段工具，内核全部 mock（与 agent-stage-tools.test.ts 同款手法），
-// 避免真实 @videoforge/pipeline / renderer 在模块加载期引入重依赖。
+// 避免真实 @videoforge/pipeline / remotion-engine 在模块加载期引入重依赖。
 vi.mock("@videoforge/pipeline", () => ({
   generateCopy: vi.fn(),
   generateImages: vi.fn(),
   generateScenes: vi.fn(),
   generateSpeech: vi.fn(),
   generateStoryboard: vi.fn(),
-  composeVideoStep: vi.fn(),
+  composeVideoStepV2: vi.fn(),
 }));
-vi.mock("@videoforge/renderer", () => ({ renderFrames: vi.fn() }));
 
-/** 阶段工具的 7 个名字（与 stage-tools 的阶段顺序一致）。 */
+/** 阶段工具的 8 个名字（与 stage-tools 的阶段顺序一致）。 */
 const STAGE_TOOL_NAMES = [
   "copy_generate",
   "image_generate",
   "scene_generate",
   "tts_generate",
+  "captions_generate",
   "storyboard_generate",
   "render_frames",
   "compose_video",
@@ -404,7 +404,7 @@ describe("createAgentTools：阶段工具 + 内置工具组合与留痕接线", 
     };
   }
 
-  test("返回 7 个阶段工具 + 内置工具，且名字集合不因是否留痕而改变", () => {
+  test("返回 8 个阶段工具 + 内置工具，且名字集合不因是否留痕而改变", () => {
     const withoutTrace = createAgentTools(composition()).map((tool) => tool.name);
     const { trace } = createMockTrace();
     const withTrace = createAgentTools(composition({ trace })).map((tool) => tool.name);
@@ -417,7 +417,7 @@ describe("createAgentTools：阶段工具 + 内置工具组合与留痕接线", 
   test("trace 缺省时，阶段工具未被包装（与 createStageTools 名字一致）", () => {
     const tools = createAgentTools(composition());
     // 未包装时就是 stage-tools 的原始对象：execute 由 stage-tools 直接提供
-    expect(tools.map((tool) => tool.name).slice(0, 7)).toEqual(STAGE_TOOL_NAMES);
+    expect(tools.map((tool) => tool.name).slice(0, 8)).toEqual(STAGE_TOOL_NAMES);
   });
 
   test("trace 存在时，阶段工具也被留痕包装（调用 copy_generate 会落 tool_calls）", async () => {

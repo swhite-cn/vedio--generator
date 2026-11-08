@@ -71,6 +71,27 @@ describe("项目资产仓储", () => {
     );
   });
 
+  test("素材库分类可写入并按分类筛选", () => {
+    const a = seed(actorA, "asset-project-category");
+    const asset = createProjectAsset(database.db, actorA, {
+      projectId: a.project.id,
+      source: "uploaded",
+      kind: "image",
+      visualCategory: "archive-photo",
+      label: "档案照片.jpg",
+      relativePath: "assets/uploads/a/档案照片.jpg",
+      mimeType: "image/jpeg",
+      sizeBytes: 256,
+    });
+    expect(asset.visual_category).toBe("archive-photo");
+    expect(
+      listProjectAssets(database.db, actorA, a.project.id, { visualCategory: "archive-photo" }),
+    ).toHaveLength(1);
+    expect(
+      listProjectAssets(database.db, actorA, a.project.id, { visualCategory: "ai-generated" }),
+    ).toEqual([]);
+  });
+
   test("同一资产只在消息中保存一条引用且保留顺序", () => {
     const a = seed(actorA, "asset-project-order");
     const first = createProjectAsset(database.db, actorA, {

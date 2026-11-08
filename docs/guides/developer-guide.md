@@ -2,7 +2,7 @@
 
 本文面向需要在 Windows 本机安装、运行、测试或扩展 VideoForge 的开发者。文中命令以 PowerShell 为例，并从仓库根目录执行。
 
-> **当前阶段：轻量本地 harness（单进程）。** 服务端已按"能力注册表 + 七阶段确定性工作流 + 内嵌 Pi agent 运行时 + 三级 trace + 多用户隔离"重建，Web 工作台按 Ant Design Vue 重建。**使用真实 Ark 服务的端到端冒烟仍未验收**（需本机填真实密钥与模型 ID 后人工验证）；Worker 独立进程与 Python 适配器已在 P12 移除。
+> **当前阶段：轻量本地 harness（单进程）。** 服务端已按"能力注册表 + 八阶段确定性工作流 + 内嵌 Pi agent 运行时 + 三级 trace + 多用户隔离"重建，Web 工作台按 Ant Design Vue 重建。**使用真实 Ark 服务的端到端冒烟仍未验收**（需本机填真实密钥与模型 ID 后人工验证）；Worker 独立进程与 Python 适配器已在 P12 移除。
 
 ## 1. 技术组成
 
@@ -11,7 +11,7 @@
 | Web 工作台   | Vue 3、Vite、Vue Router、Pinia、Ant Design Vue 4                                  |
 | API / 工作流 | Node.js、TypeScript、Fastify 5、`@fastify/jwt`、`@earendil-works/pi-coding-agent` |
 | 数据层       | SQLite、Drizzle ORM、better-sqlite3                                               |
-| 媒体渲染     | Playwright、Chromium、ffmpeg、ffprobe                                             |
+| 媒体渲染     | Remotion、Chromium、ffmpeg、ffprobe                                               |
 | 测试         | Vitest                                                                            |
 | Workspace    | pnpm 10                                                                           |
 
@@ -22,11 +22,12 @@ apps/
   server/                 Fastify 单进程（http / domain / agent / workflow / trace）
   cli/                    CLI 运维入口（doctor / status / db:migrate / db:user / storage:prune / project:verify）
   web/                    Vue 工作台（Ant Design Vue）
+  player/                 React + @remotion/player 单镜预览器（构建为 IIFE，供工作台 iframe 引用）
 packages/
   shared/                 领域类型、能力注册表、错误码
   pipeline/               配置、Ark 客户端、ffmpeg/ffprobe、文案/生图/TTS/时间轴/合成能力
-  renderer/               Playwright 场景渲染（单场景与多场景连续帧）
-  template-sdk/           场景契约、内置动画模板、Profile 与 GSAP 供应商
+  remotion-engine/        Remotion 帧驱动渲染（主题解析、组件装配、renderShots/renderShotStill）
+  template-sdk/           输出 Profile 与组件注册表
 config/                   默认配置、本机配置模板、提示词集、输出 Profile
 tests/                    Vitest 单元测试；tests/integration 为真机冒烟（默认不入全量单测）
 ```
@@ -192,7 +193,7 @@ pnpm exec tsc -p apps/cli/tsconfig.json --noEmit
 
 `pnpm test:smoke` 通过 `VF_SMOKE=1` 只跑 `tests/integration/smoke-pipeline.test.ts`，用于兜底"mock 单测全绿、真机 seek 挂起"类回归。
 
-## 7. 架构与七阶段流水线
+## 7. 架构与八阶段流水线
 
 ### 7.1 服务端分层
 
@@ -204,9 +205,9 @@ pnpm exec tsc -p apps/cli/tsconfig.json --noEmit
 
 业务能力实现在 `packages/*`，服务端只做编排，不要在 `apps/server` 复制领域类型。
 
-### 7.2 七阶段与审核点
+### 7.2 八阶段与审核点
 
-阶段顺序固定为 `copy → image → scene → tts → storyboard → render → compose`，定义在 `packages/shared/src/domain.ts` 的 `PIPELINE_STAGES`。审核点固定在 `copy`、`image` 之后（`REVIEW_GATE_STAGES`）：命中后 run 进入 `waiting_review`，需通过 Web 工作台或 API 恢复。
+阶段顺序固定为 `copy → image → scene → tts → captions → storyboard → render → compose`，定义在 `packages/shared/src/domain.ts` 的 `PIPELINE_STAGES`。审核点固定在 `copy`、`image` 之后（`REVIEW_GATE_STAGES`）：命中后 run 进入 `waiting_review`，需通过 Web 工作台或 API 恢复。
 
 新建项目时服务端会同步创建会话、首个 run 并异步触发工作流，因此工作台立即能看到 `运行中` 的 run。
 
@@ -239,7 +240,7 @@ CLI（`apps/cli`）只保留运维命令，约定 stdout 输出一行机器可�
 | `db:migrate`     | 执行数据库迁移（幂等）                                                                           |
 | `db:user`        | 列出用户 / `--create` 建号 / `--reset-password` 本机恢复口令                                     |
 | `storage:prune`  | 按保留策略清理工件                                                                               |
-| `project:verify` | 校验项目产物完整性                                                                               |
+| `project:verify` | 校验项目产物完整性（按能力声明逐阶段判定；输出契约版本，v1 旧项目附迁移提示）          |
 
 示例：
 
@@ -296,7 +297,7 @@ pnpm --filter @videoforge/cli start project:verify --project <项目 id>
 | 启动报 `CONFIG_INVALID`（JWT）  | 设置 `JWT_SECRET`，长度至少 32 字符                                                                                        |
 | `pnpm` 不存在                   | 重开 PowerShell；执行 `npm install -g pnpm@10.0.0`                                                                         |
 | `doctor` 找不到 ffmpeg          | 检查 PATH，或在 `system.local.yaml` 的 `tools` 段写完整路径                                                                |
-| Playwright 启动浏览器失败       | 检查 Chrome 路径；或安装 Playwright 管理的 Chromium：`pnpm --filter @videoforge/renderer exec playwright install chromium` |
+| Remotion 启动浏览器失败         | 在 `config/system.local.yaml` 的 `tools.chromium_path` 指定本机 Chrome/Chromium 可执行文件；留空时由 Remotion 自动解析或下载 `chrome-headless-shell` |
 | `better-sqlite3` 找不到 binding | 执行 `pnpm rebuild better-sqlite3`                                                                                         |
 | Web 页面无法请求 API            | 确认 API 在 `127.0.0.1` 的 `server.port` 端口运行；开发模式由 Vite 自动代理                                                |
 | `pnpm install` 报 lockfile 过期 | 依赖变更后执行 `pnpm install --no-frozen-lockfile` 更新 `pnpm-lock.yaml`                                                   |

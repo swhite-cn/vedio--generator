@@ -50,6 +50,10 @@ export const projects = sqliteTable(
     style: text("style"),
     /** 输出 Profile 名（默认 `landscape-1080p`，见设计文档 §6.1）。 */
     profile: text("profile").notNull(),
+    /** 项目主题 ID（创建时快照，v2 起使用；旧项目为空）。 */
+    themeId: text("theme_id"),
+    /** 契约版本：`1.0` 为七阶段旧链路，`2.0` 为 shots/cue 链路。 */
+    contractVersion: text("contract_version").notNull().default("1.0"),
     /** `status ∈ draft|running|review|done|failed`（见设计文档 §8.4）。 */
     status: text("status").notNull().default("draft"),
     createdAt: timestamp(),
@@ -97,6 +101,8 @@ export const projectAssets = sqliteTable(
     source: text("source").notNull(),
     /** 资产类型见共享 `PROJECT_ASSET_KINDS`。 */
     kind: text("kind").notNull(),
+    /** 素材库展示分类（AI 生成/实拍上传/档案照片/3D 渲染/视频片段/风格锚）；旧数据为空。 */
+    visualCategory: text("visual_category"),
     label: text("label").notNull(),
     /** 相对项目目录、使用 POSIX `/` 分隔符。 */
     relativePath: text("relative_path").notNull(),
@@ -166,6 +172,10 @@ export const runs = sqliteTable(
     trigger: text("trigger").notNull(),
     currentStage: text("current_stage"),
     errorCode: text("error_code"),
+    /** 镜头级重生成范围（JSON）：`{ shotIds, fromStage }`；整片 run 为空。 */
+    scopeJson: text("scope_json"),
+    /** 契约版本快照：run 创建时继承项目版本，保证续跑语义可追溯。 */
+    contractVersion: text("contract_version").notNull().default("1.0"),
     createdAt: timestamp(),
     startedAt: text("started_at"),
     endedAt: text("ended_at"),
@@ -246,5 +256,33 @@ export const llmCalls = sqliteTable(
   (table) => [
     index("idx_llm_calls_session").on(table.sessionId),
     index("idx_llm_calls_run").on(table.runId),
+  ],
+);
+
+/**
+ * 登录事件表（追加式）：记录成功/失败登录，供管理页"登录日志"展示。
+ * 用户名保留原始输入（不归一化），便于排查大小写或拼写错误；密码永不落库。
+ */
+export const loginEvents = sqliteTable(
+  "login_events",
+  {
+    id: id(),
+    /** 命中的用户 ID；用户不存在或密码错误时为空。 */
+    userId: text("user_id"),
+    /** 登录时输入的用户名。 */
+    username: text("username").notNull(),
+    /** 是否成功（落库 0/1）。 */
+    ok: integer("ok", { mode: "boolean" }).notNull(),
+    /** 失败原因（稳定短码，例如 INVALID_CREDENTIALS / THROTTLED）；成功时为空。 */
+    reason: text("reason"),
+    /** 来源 IP（本机部署通常为 127.0.0.1）。 */
+    ip: text("ip"),
+    /** User-Agent 原文，可能为空。 */
+    userAgent: text("user_agent"),
+    createdAt: timestamp(),
+  },
+  (table) => [
+    index("idx_login_events_created").on(table.createdAt),
+    index("idx_login_events_username").on(table.username),
   ],
 );

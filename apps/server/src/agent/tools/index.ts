@@ -6,7 +6,7 @@ import { withToolTrace, resolveTraceId, type ToolTraceOptions } from "./tool-tra
 
 /**
  * agent 工具集入口。
- * 汇总「7 个阶段工具」（自定义工具，见 `stage-tools.ts`）与「Pi 内置工具」（见 `builtin-tools.ts`），
+ * 汇总「8 个阶段工具」（自定义工具，见 `stage-tools.ts`）与「Pi 内置工具」（见 `builtin-tools.ts`），
  * 并提供把两者组合、统一挂上工具调用留痕的 `createAgentTools`。
  */
 export {

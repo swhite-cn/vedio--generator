@@ -36,7 +36,8 @@ assets:
   max_message_refs: 12
 
 tools:
-  # 空值表示由 Playwright 管理浏览器。
+  # 空值表示由 Remotion 自动解析或下载浏览器（chrome-headless-shell）；
+  # 填写本机 Chrome/Chromium 可执行文件路径可复用已有浏览器，避免重复下载。
   chromium_path: ""
   # ffmpeg 命令名或完整路径。
   ffmpeg_path: "ffmpeg"

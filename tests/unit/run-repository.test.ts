@@ -52,6 +52,25 @@ describe("run 仓储", () => {
     expect(run.trigger).toBe("user");
     expect(run.current_stage).toBeNull();
     expect(run.error_code).toBeNull();
+    expect(run.scope_json).toBeNull();
+    expect(run.contract_version).toBe("1.0");
+  });
+
+  test("镜头级范围与契约版本可持久化并读回", () => {
+    const scope = { shotIds: ["sh-001", "sh-002"], fromStage: "image" as const };
+    const run = createRun(database.db, userA, {
+      projectId,
+      sessionId,
+      trigger: "user",
+      scope,
+      contractVersion: "2.0",
+    });
+    expect(run.scope_json).toEqual(scope);
+    expect(run.contract_version).toBe("2.0");
+
+    const reloaded = getRun(database.db, userA, run.id);
+    expect(reloaded?.scope_json).toEqual(scope);
+    expect(reloaded?.contract_version).toBe("2.0");
   });
 
   test("run 按 user_id 隔离：他人不可见", () => {

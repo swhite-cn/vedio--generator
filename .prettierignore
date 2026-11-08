@@ -7,7 +7,6 @@ storage
 design-mockups
 pnpm-lock.yaml
 *.min.js
-packages/renderer/src/stage.html
 *.db
 *.db-shm
 *.db-wal

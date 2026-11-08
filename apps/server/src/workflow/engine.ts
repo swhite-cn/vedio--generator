@@ -5,6 +5,7 @@ import type {
   PipelineStage,
   Project,
   Run,
+  RunScope,
   RunStageStatus,
 } from "@videoforge/shared";
 import { VideoForgeError } from "@videoforge/shared";
@@ -26,7 +27,7 @@ import { buildStageInstruction, buildStageInstructionMessage } from "./stage-ins
 
 // ---------------------------------------------------------------------------
 // 工作流引擎主循环（见设计文档 §6.1–§6.5）。
-// 引擎按能力声明驱动七阶段线性 DAG：不含阶段知识（顺序 / 工具名 / 产物判据全部来自声明）、
+// 引擎按能力声明驱动八阶段线性 DAG：不含阶段知识（顺序 / 工具名 / 产物判据全部来自声明）、
 // 不直接调用内核（通过注入的 `executeStage` 端口驱动 agent 会话），只负责
 // 阶段顺序、断点选择、状态推进、审核点暂停、重试上限与全局阶段并发。
 // ---------------------------------------------------------------------------
@@ -62,6 +63,8 @@ export interface StageExecutionRequest {
   instruction: string;
   /** 用户 retry 反馈（仅审核点重跑时非空）。 */
   feedback?: string;
+  /** 镜头级重生成范围；整片 run 为空。 */
+  scope?: RunScope | null;
 }
 
 /** 阶段执行结果（由执行器返回）。 */
@@ -124,6 +127,17 @@ export interface WorkflowEngineOptions {
    * 回调异常会被吞掉并打诊断日志——留痕问题不得中断工作流。
    */
   onStageChange?: (record: StageChangeRecord) => void;
+  /**
+   * 阶段完成钩子（T207）：整片推进中每个阶段 done 后调用（审核点/retry 同样触发）。
+   * 用于质检门禁等"阶段后置动作"；抛错只告警不阻塞 run——质检结论不改变阶段状态。
+   */
+  onStageCompleted?: (input: {
+    actor: Actor;
+    run: Run;
+    project: Project;
+    projectDir: string;
+    stage: PipelineStage;
+  }) => Promise<void>;
   /** 时钟注入（测试）；缺省 Date.now。 */
   now?: () => number;
 }
@@ -183,6 +197,13 @@ interface EngineContext {
   executeStage: StageExecutor;
   emit: (event: WorkflowEvent) => void;
   onStageChange: (record: StageChangeRecord) => void;
+  onStageCompleted: (input: {
+    actor: Actor;
+    run: Run;
+    project: Project;
+    projectDir: string;
+    stage: PipelineStage;
+  }) => Promise<void>;
   timestamp: () => string;
   semaphore: Semaphore;
   /** 已取消 run 的集合：在途阶段据此提前退出，避免取消后把 run 覆盖为 failed。 */
@@ -280,6 +301,29 @@ function notifyStageChange(ctx: EngineContext, record: StageChangeRecord): void 
 }
 
 /**
+ * 通知阶段完成钩子（质检门禁等后置动作）；钩子失败只告警，不影响 run 推进。
+ * @param ctx 引擎上下文
+ * @param input 钩子入参
+ */
+async function notifyStageCompleted(ctx: EngineContext, input: {
+  actor: Actor;
+  run: Run;
+  project: Project;
+  projectDir: string;
+  stage: PipelineStage;
+}): Promise<void> {
+  try {
+    await ctx.onStageCompleted(input);
+  } catch (error) {
+    console.warn(
+      `[workflow-engine] 阶段完成钩子失败（${input.stage}）：${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+}
+
+/**
  * 执行单个阶段（含自救重试），整段由全局并发信号量包住。
  *
  * 尝试序号从该阶段「首个 `pending` 行的 attempt」起算（正常首跑为 0；审核点 retry 为「最大 attempt + 1」），
@@ -351,6 +395,7 @@ async function executeStageWithRetry(
         attempt,
         previousErrorCode,
         feedback: feedback ?? null,
+        scope: run.scope_json,
       };
       const instruction = buildStageInstruction(instructionInput);
       // 阶段指令以 role=system 落库（Pi 兼容负载），供历史重建与 trace 回放
@@ -381,6 +426,7 @@ async function executeStageWithRetry(
           attempt,
           instruction,
           feedback: feedback ?? undefined,
+          scope: run.scope_json,
         });
       } catch (err) {
         // 执行器异常不冒泡出 run()：按「本阶段未达标」处理，记一次诊断日志
@@ -422,6 +468,13 @@ async function executeStageWithRetry(
         emitEvent(ctx, run, "stage_done", {
           stage: declaration.stage,
           payload: { attempt, artifactPaths, endedAt },
+        });
+        await notifyStageCompleted(ctx, {
+          actor,
+          run,
+          project,
+          projectDir,
+          stage: declaration.stage,
         });
         return { status: "done", artifactPaths };
       }
@@ -489,7 +542,10 @@ async function advance(
     startedAt: run.started_at ?? ctx.timestamp(),
     currentStage: null,
   });
-  emitEvent(ctx, run, "run_started");
+  // 镜头级重生成时把范围随 run_start 下发，前端可据此提示"仅重跑目标镜头"
+  emitEvent(ctx, run, "run_started", {
+    payload: { scope: run.scope_json },
+  });
 
   for (let index = context.startIndex; index < capability.stages.length; index += 1) {
     const declaration = capability.stages[index];
@@ -582,7 +638,22 @@ async function runWorkflow(
   const project = requireProject(ctx, actor, run.project_id);
   const capability = requireCapability(project.capability_id);
   const projectDir = resolveUserProjectDir(ctx.storageRoot, actor.userId, project.name);
-  const { startIndex } = resolveBreakpoint(projectDir, capability, project.profile);
+  const breakpoint = resolveBreakpoint(projectDir, capability, project.profile);
+
+  // 镜头级重生成：fromStage 明确指定起点时强制从该阶段开始（即使前序产物已存在），
+  // 前序阶段一律记 skipped，避免"文件在但本次只重跑指定范围"被断点判据跳回旧起点。
+  let startIndex = breakpoint.startIndex;
+  const fromStage = run.scope_json?.fromStage;
+  if (fromStage) {
+    const fromIndex = capability.stages.findIndex((declaration) => declaration.stage === fromStage);
+    if (fromIndex < 0) {
+      throw new VideoForgeError(
+        "CONFIG_INVALID",
+        `镜头重生成起点阶段不存在：${String(fromStage)}`,
+      );
+    }
+    startIndex = fromIndex;
+  }
 
   // 幂等补建阶段行：断点前已达标者标 skipped，其余标 pending；已存在（attempt=0）不重复创建
   for (let index = 0; index < capability.stages.length; index += 1) {
@@ -700,6 +771,7 @@ export function createWorkflowEngine(options: WorkflowEngineOptions): WorkflowEn
     executeStage: options.executeStage,
     emit: options.emit ?? (() => {}),
     onStageChange: options.onStageChange ?? (() => {}),
+    onStageCompleted: options.onStageCompleted ?? (async () => {}),
     timestamp: () => new Date((options.now ?? Date.now)()).toISOString(),
     semaphore: createSemaphore(options.config.runtime.max_concurrent_stage),
     canceled: new Set(),

@@ -23,17 +23,19 @@ const statements = [
 
   // --- 2) 新领域 8 张表（字段逐字对齐设计文档 §11） ---
   `CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT NOT NULL, password_hash TEXT NOT NULL, display_name TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'user', must_change_password INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, last_login_at TEXT)`,
-  `CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, capability_id TEXT NOT NULL, name TEXT NOT NULL, topic TEXT NOT NULL, style TEXT, profile TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'draft', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, capability_id TEXT NOT NULL, name TEXT NOT NULL, topic TEXT NOT NULL, style TEXT, profile TEXT NOT NULL, theme_id TEXT, contract_version TEXT NOT NULL DEFAULT '1.0', status TEXT NOT NULL DEFAULT 'draft', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, run_id TEXT, role TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL)`,
-  `CREATE TABLE IF NOT EXISTS project_assets (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, source TEXT NOT NULL, kind TEXT NOT NULL, label TEXT NOT NULL, relative_path TEXT NOT NULL, mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, run_id TEXT, stage TEXT, supersedes_asset_id TEXT, metadata_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS project_assets (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, source TEXT NOT NULL, kind TEXT NOT NULL, visual_category TEXT, label TEXT NOT NULL, relative_path TEXT NOT NULL, mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, run_id TEXT, stage TEXT, supersedes_asset_id TEXT, metadata_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS message_asset_refs (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, asset_id TEXT NOT NULL, ordinal INTEGER NOT NULL, created_at TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS agent_actions (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, session_id TEXT NOT NULL, message_id TEXT NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL, plan_json TEXT NOT NULL, run_id TEXT, error_code TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
   // `trigger` 是 SQLite 保留字，DDL 中必须加引号；drizzle 查询侧会自动加引号
-  `CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, session_id TEXT NOT NULL, status TEXT NOT NULL, "trigger" TEXT NOT NULL, current_stage TEXT, error_code TEXT, created_at TEXT NOT NULL, started_at TEXT, ended_at TEXT)`,
+  `CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, session_id TEXT NOT NULL, status TEXT NOT NULL, "trigger" TEXT NOT NULL, current_stage TEXT, error_code TEXT, scope_json TEXT, contract_version TEXT NOT NULL DEFAULT '1.0', created_at TEXT NOT NULL, started_at TEXT, ended_at TEXT)`,
   `CREATE TABLE IF NOT EXISTS run_stages (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, stage TEXT NOT NULL, status TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 0, error_code TEXT, artifact_paths TEXT NOT NULL DEFAULT '[]', started_at TEXT, ended_at TEXT)`,
   `CREATE TABLE IF NOT EXISTS tool_calls (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, run_id TEXT, stage_id TEXT, tool TEXT NOT NULL, args_json TEXT NOT NULL, ok INTEGER NOT NULL, error_code TEXT, duration_ms INTEGER NOT NULL, artifact_paths TEXT NOT NULL DEFAULT '[]', output_preview TEXT, output_truncated INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS llm_calls (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, run_id TEXT, stage_id TEXT, model TEXT NOT NULL, request_json TEXT NOT NULL, response_json TEXT NOT NULL, prompt_tokens INTEGER NOT NULL, completion_tokens INTEGER NOT NULL, duration_ms INTEGER NOT NULL, ok INTEGER NOT NULL, error_code TEXT, created_at TEXT NOT NULL)`,
+  // 追加式登录日志（管理页使用）；密码与指纹不入库
+  `CREATE TABLE IF NOT EXISTS login_events (id TEXT PRIMARY KEY, user_id TEXT, username TEXT NOT NULL, ok INTEGER NOT NULL, reason TEXT, ip TEXT, user_agent TEXT, created_at TEXT NOT NULL)`,
 
   // --- 2.1) 唯一索引与查询索引 ---
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users (username)`,
@@ -54,6 +56,8 @@ const statements = [
   `CREATE INDEX IF NOT EXISTS idx_tool_calls_run ON tool_calls (run_id)`,
   `CREATE INDEX IF NOT EXISTS idx_llm_calls_session ON llm_calls (session_id)`,
   `CREATE INDEX IF NOT EXISTS idx_llm_calls_run ON llm_calls (run_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_login_events_created ON login_events (created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_login_events_username ON login_events (username)`,
 ];
 
 /**
@@ -115,6 +119,12 @@ export function migrateDatabase(filename: string): void {
     // 追加式补列（既有数据库升级路径）
     ensureColumn(db, sqlite, "tool_calls", "output_preview", "TEXT");
     ensureColumn(db, sqlite, "tool_calls", "output_truncated", "INTEGER NOT NULL DEFAULT 0");
+    // v2 契约与镜头级范围（见重构方案 §6.1）
+    ensureColumn(db, sqlite, "projects", "theme_id", "TEXT");
+    ensureColumn(db, sqlite, "projects", "contract_version", "TEXT NOT NULL DEFAULT '1.0'");
+    ensureColumn(db, sqlite, "runs", "scope_json", "TEXT");
+    ensureColumn(db, sqlite, "runs", "contract_version", "TEXT NOT NULL DEFAULT '1.0'");
+    ensureColumn(db, sqlite, "project_assets", "visual_category", "TEXT");
   });
   migrate();
   console.info(`[db] migration completed: ${filename}`);

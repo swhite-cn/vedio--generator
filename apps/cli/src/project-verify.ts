@@ -1,12 +1,21 @@
 import { existsSync, readFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
-import { VideoForgeError, type Actor, type CapabilityDeclaration } from "@videoforge/shared";
+import {
+  CONTRACT_VERSION_V2,
+  VideoForgeError,
+  type Actor,
+  type CapabilityDeclaration,
+} from "@videoforge/shared";
 import { assertInsideUserRoot, loadSystemConfig, probeDurationMs } from "@videoforge/pipeline";
 import { createDatabase } from "@videoforge/server/src/db/index.js";
 import { adminListProjects } from "@videoforge/server/src/db/repositories/project-repository.js";
 import { getCapability } from "@videoforge/server/src/workflow/capabilities.js";
 import { verifyStageArtifact } from "@videoforge/server/src/workflow/breakpoint.js";
 import { resolveUserProjectDir } from "@videoforge/server/src/domain/storage-layout.js";
+import {
+  isRunnableContract,
+  legacyProjectMigrationHint,
+} from "@videoforge/server/src/domain/project-contract.js";
 import { requireFlag } from "./args.js";
 
 /** 单阶段产物体检结果。 */
@@ -29,9 +38,11 @@ export interface VerifyReport {
   project: string;
   projectDir: string;
   profile: string;
+  /** 项目契约版本（`projects.contract_version`；T504 起输出，便于区分 v2 与存量 v1）。 */
+  contractVersion: string;
   stages: StageCheck[];
   final: VerifyFinalCheck | null;
-  /** 所有阶段达标且（若有成片）时长一致。 */
+  /** 契约版本可运行（v2）且所有阶段达标、且（若有成片）时长一致。 */
   ok: boolean;
   hints: string[];
 }
@@ -52,6 +63,7 @@ const CLI_ADMIN_ACTOR: Actor = { userId: "cli", role: "admin" };
  * @param options.declaration 能力声明（提供阶段判据与成片文件相对路径）
  * @param options.profile 输出 Profile 名（用于替换 glob 中的 `<profile>`）
  * @param options.ffprobePath ffprobe 可执行文件
+ * @param options.contractVersion 项目契约版本（缺省视为 v2；非 v2 时追加迁移提示并判 `ok=false`）
  * @param options.probe 时长探针（默认 `probeDurationMs`；测试可注入）
  * @returns 体检报告
  */
@@ -60,10 +72,16 @@ export async function verifyProjectArtifacts(options: {
   declaration: CapabilityDeclaration;
   profile: string;
   ffprobePath: string;
+  contractVersion?: string;
   probe?: (ffprobePath: string, mediaPath: string) => Promise<number>;
 }): Promise<VerifyReport> {
   const probe = options.probe ?? probeDurationMs;
+  const contractVersion = options.contractVersion ?? CONTRACT_VERSION_V2;
   const hints: string[] = [];
+
+  // 存量（契约非 v2）项目无法续跑：给出可执行的迁移提示，并直接判体检不通过
+  const runnable = isRunnableContract(contractVersion);
+  if (!runnable) hints.push(legacyProjectMigrationHint(contractVersion));
 
   const stages: StageCheck[] = options.declaration.stages.map((stage) => ({
     stage: stage.stage,
@@ -121,12 +139,16 @@ export async function verifyProjectArtifacts(options: {
     hints.push(`成片时长与 timeline 偏差 ${final.deltaMs}ms，超出容差 ±${TIMELINE_TOLERANCE_MS}ms`);
   }
 
-  const ok = stages.every((check) => check.ok) && (final === null || final.consistent !== false);
+  const ok =
+    runnable &&
+    stages.every((check) => check.ok) &&
+    (final === null || final.consistent !== false);
 
   return {
     project: basename(options.projectDir),
     projectDir: options.projectDir,
     profile: options.profile,
+    contractVersion,
     stages,
     final,
     ok,
@@ -188,6 +210,7 @@ export async function runProjectVerify(
       projectDir,
       declaration,
       profile: project.profile,
+      contractVersion: project.contract_version,
       ffprobePath: config.tools.ffprobe_path,
     });
     process.stdout.write(`${JSON.stringify(report)}\n`);

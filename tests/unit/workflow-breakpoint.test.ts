@@ -5,6 +5,11 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { ArtifactPredicate } from "@videoforge/shared";
 import { getCapability } from "../../apps/server/src/workflow/capabilities";
 import { resolveBreakpoint, verifyStageArtifact } from "../../apps/server/src/workflow/breakpoint";
+import {
+  seedV2Project,
+  writeFixtureCopyV2,
+  writeFixtureSceneSpec,
+} from "./helpers/v2-project-fixture";
 
 /**
  * 产物判据解释器与断点扫描单测（Phase 8 Step 2）。
@@ -38,14 +43,21 @@ function validCopyJson(): string {
   });
 }
 
-/** 构造 `video-generation` 全阶段产物（用于“全部达标”用例）。 */
-function writeAllArtifacts(): void {
-  writeProjectFile("copy.json", validCopyJson());
+/** 写出 image 阶段达标产物（`images/*.png` 至少 1 张）。 */
+function writeImageArtifacts(): void {
   writeProjectFile("images/cover.png", "png");
-  writeProjectFile("scenes/s1.html", "<html></html>");
-  writeProjectFile("audio/s1.mp3", "mp3");
-  writeProjectFile("timeline.json", JSON.stringify({ scenes: [] }));
-  writeProjectFile("build/render/landscape-1080p/frames/0001.jpg", "jpg");
+}
+
+/** 写出 render 阶段达标产物（`build/render/<profile>/frames/*.jpg` 至少 1 帧）。 */
+function writeRenderArtifacts(profile = "landscape-1080p"): void {
+  writeProjectFile(`build/render/${profile}/frames/0001.jpg`, "jpg");
+}
+
+/** 构造 `video-generation` 全阶段达标产物（v2 结构，用于“全部达标”用例）。 */
+function writeAllArtifacts(): void {
+  seedV2Project(projectDir);
+  writeImageArtifacts();
+  writeRenderArtifacts();
   writeProjectFile("final.mp4", "mp4");
 }
 
@@ -162,16 +174,16 @@ describe("resolveBreakpoint：断点扫描", () => {
   });
 
   test("仅 copy 达标 → 从 image 开始，skipped=[copy]", () => {
-    writeProjectFile("copy.json", validCopyJson());
+    writeFixtureCopyV2(projectDir);
     const result = resolveBreakpoint(projectDir, declaration, "landscape-1080p");
     expect(result.startIndex).toBe(1);
     expect(result.skipped).toEqual(["copy"]);
   });
 
   test("前 3 阶段达标（copy/image/scene）→ 从 tts 开始", () => {
-    writeProjectFile("copy.json", validCopyJson());
-    writeProjectFile("images/a.png", "a");
-    writeProjectFile("scenes/a.html", "<html></html>");
+    const copy = writeFixtureCopyV2(projectDir);
+    writeImageArtifacts();
+    writeFixtureSceneSpec(projectDir, copy);
     const result = resolveBreakpoint(projectDir, declaration, "landscape-1080p");
     expect(result.startIndex).toBe(3);
     expect(result.skipped).toEqual(["copy", "image", "scene"]);

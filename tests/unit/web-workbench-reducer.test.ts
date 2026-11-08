@@ -4,14 +4,14 @@
  * 逐类事件断言落点，覆盖 §7.2 全部 10 类事件：
  * text_delta / tool_start / tool_end / turn_end / run_start / run_stage /
  * review_gate / run_end / resync / error，外加未识别事件的容错与
- * `sevenStages` / `toStageProgress` / `STAGE_ORDER` 的结构断言。
+ * `stagePlaceholders` / `toStageProgress` / `STAGE_ORDER` 的结构断言。
  */
 import { describe, expect, test } from "vitest";
 import {
   STAGE_ORDER,
   applyEvent,
   createInitialState,
-  sevenStages,
+  stagePlaceholders,
   toStageProgress,
   type WorkbenchState,
 } from "../../apps/web/src/stores/workbench-reducer";
@@ -28,26 +28,27 @@ function lastMessage(state: WorkbenchState) {
   return state.messages[state.messages.length - 1];
 }
 
-describe("结构：七阶段初始状态", () => {
-  test("STAGE_ORDER 为固定七阶段顺序", () => {
+describe("结构：八阶段初始状态", () => {
+  test("STAGE_ORDER 为固定八阶段顺序", () => {
     expect(STAGE_ORDER).toEqual([
       "copy",
       "image",
       "scene",
       "tts",
+      "captions",
       "storyboard",
       "render",
       "compose",
     ]);
   });
 
-  test("sevenStages 生成 7 条 pending 阶段", () => {
-    const stages = sevenStages();
-    expect(stages).toHaveLength(7);
+  test("stagePlaceholders 生成 8 条 pending 阶段", () => {
+    const stages = stagePlaceholders();
+    expect(stages).toHaveLength(8);
     expect(stages.every((s) => s.status === "pending" && s.attempt === 0)).toBe(true);
   });
 
-  test("toStageProgress 恒返回 7 条并按固定顺序补齐缺失阶段", () => {
+  test("toStageProgress 恒返回 8 条并按固定顺序补齐缺失阶段", () => {
     const stages = toStageProgress([
       { stage: "copy", status: "done", attempt: 1, started_at: "t0", ended_at: "t1" },
       { stage: "image", status: "failed", attempt: 2, error_code: "ADAPTER_FAILED" },
@@ -318,7 +319,31 @@ describe("resync", () => {
     expect(state.currentRun).toBeNull();
     expect(state.artifacts).toBeNull();
     expect(state.needsResync).toBe(true);
-    expect(state.stages).toHaveLength(7);
+    expect(state.stages).toHaveLength(8);
+  });
+});
+
+describe("方案增量事件（shot.updated / quality.updated / asset.bound / preview.ready）", () => {
+  test("shot.updated 同时自增分镜与产物刷新令牌", () => {
+    const state = applyEvent(createInitialState(), frame("shot.updated", { shotId: "sh-001" }));
+    expect(state.storyboardRefreshToken).toBe(1);
+    expect(state.artifactRefreshToken).toBe(1);
+  });
+
+  test("quality.updated 自增质检刷新令牌", () => {
+    const state = applyEvent(createInitialState(), frame("quality.updated", { report: {} }));
+    expect(state.qualityRefreshToken).toBe(1);
+  });
+
+  test("asset.bound 自增分镜刷新令牌", () => {
+    const state = applyEvent(createInitialState(), frame("asset.bound", { shotId: "sh-001" }));
+    expect(state.storyboardRefreshToken).toBe(1);
+  });
+
+  test("preview.ready 不推进工作台状态", () => {
+    const base = createInitialState();
+    const state = applyEvent(base, frame("preview.ready", { shotId: "sh-001" }));
+    expect(state).toEqual(base);
   });
 });
 

@@ -1,8 +1,12 @@
 import { readdirSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import type { AgentToolResult, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { renderShots } from "@videoforge/remotion-engine";
 import {
-  composeVideoStep,
+  CAPTIONS_RELATIVE_PATH,
+  SCENE_SPEC_RELATIVE_PATH,
+  composeVideoStepV2,
+  generateCaptions,
   generateCopy,
   generateImages,
   generateScenes,
@@ -10,12 +14,52 @@ import {
   generateStoryboard,
   type SystemConfig,
 } from "@videoforge/pipeline";
-import { renderFrames } from "@videoforge/renderer";
 import { VideoForgeError, type OutputProfile } from "@videoforge/shared";
 import { Type, type Static, type TSchema } from "typebox";
+import { prepareShotRenderInput } from "../../domain/render-input.js";
+import type { SseEventType } from "../../http/event-bus.js";
+
+/** Remotion bundle 入口（packages/remotion-engine 源码，bundle 期自行编译）。 */
+const REMOTION_ENTRY_POINT = join("packages", "remotion-engine", "src", "entry.tsx");
 
 /**
- * 七个「阶段工具」的 TypeBox 定义（见设计文档 §5.4）。
+ * 解析 BGM 资产入参为项目内绝对路径（T205）。
+ * `bgm` 只接受项目资产 ID（不含路径分隔符），对应 `<projectDir>/assets/uploads/<assetId>/`
+ * 目录下的唯一文件；该约定让模型无需（也不能）指定文件系统路径。
+ * @param projectDir 项目工作目录
+ * @param assetId 项目资产 ID
+ * @returns BGM 文件绝对路径
+ * @throws VideoForgeError(`CONFIG_INVALID`) 资产 ID 非法或目录内文件数不为 1
+ */
+function resolveBgmAsset(projectDir: string, assetId: string): string {
+  if (!assetId.trim() || /[\\/]/.test(assetId)) {
+    throw new VideoForgeError(
+      "CONFIG_INVALID",
+      `bgm 必须是项目资产 ID（不允许路径），收到：${assetId}`,
+    );
+  }
+  const assetDir = join(projectDir, "assets", "uploads", assetId);
+  let entries: string[];
+  try {
+    entries = readdirSync(assetDir);
+  } catch {
+    throw new VideoForgeError(
+      "CONFIG_INVALID",
+      `BGM 资产不存在：${assetId}（请先在项目中上传背景音乐资产）`,
+    );
+  }
+  const files = entries.filter((entry) => !entry.startsWith("."));
+  if (files.length !== 1) {
+    throw new VideoForgeError(
+      "CONFIG_INVALID",
+      `BGM 资产 ${assetId} 目录内应有且只有一个文件，实际 ${files.length} 个`,
+    );
+  }
+  return join(assetDir, files[0]!);
+}
+
+/**
+ * 八个「阶段工具」的 TypeBox 定义（见设计文档 §5.4；captions 为 v2 新增的字幕轨阶段）。
  *
  * 设计铁律：
  * - **入参不含任何路径**：项目目录、copyPath、outFile 全部由运行时注入的 `StageToolContext` 决定，
@@ -52,8 +96,20 @@ export interface StageToolContext {
   profile: OutputProfile;
   /** 项目风格（由 `projects.style` 注入，`copy_generate` 未显式传 style 时回退使用）。 */
   style?: string;
+  /**
+   * 项目契约版本（`1.0`/`2.0`）；缺省按 v1 处理（copy/image 阶段仍有 v1 分支）。
+   * 场景、时间轴、渲染、合成四阶段已收敛为 v2-only，旧项目会在此报 `CONFIG_INVALID`。
+   */
+  contractVersion?: string;
   /** 运行 ID（写运行轨迹用）。 */
   runId?: string;
+  /** 所属会话 ID（v2 渲染事件按会话推送 SSE 用）；自由对话之外的装配可为空。 */
+  sessionId?: string;
+  /**
+   * 项目级 SSE 事件出口（T204：`asset.bound` / `preview.ready`）；
+   * 未接入事件总线的装配（单测 / CLI）缺省不发布，发布失败不影响工具结果。
+   */
+  publishEvent?: (type: SseEventType, payload: Record<string, unknown>) => void;
   /** 系统配置（本文件只用到 `runtime.max_concurrent_stage` 与 `runtime.scene_concurrency`）。 */
   config: SystemConfig;
 }
@@ -104,12 +160,13 @@ interface AnyStageToolSpec {
   run: (params: any, context: StageToolContext) => Promise<StageToolOutcome>;
 }
 
-/** 阶段顺序的 7 个工具名（供测试与运行时核对）。 */
+/** 阶段顺序的 8 个工具名（供测试与运行时核对；captions 在 tts 之后、storyboard 之前）。 */
 const STAGE_TOOL_NAMES = [
   "copy_generate",
   "image_generate",
   "scene_generate",
   "tts_generate",
+  "captions_generate",
   "storyboard_generate",
   "render_frames",
   "compose_video",
@@ -249,7 +306,7 @@ function createStageTool(
 }
 
 /**
- * 构造 7 个阶段工具（顺序即阶段顺序），入参 schema 为 TypeBox。
+ * 构造 8 个阶段工具（顺序即阶段顺序），入参 schema 为 TypeBox。
  * @param context 运行时注入的项目上下文（根目录、项目目录、画幅、风格、runId、配置）
  * @returns 按阶段顺序排列的阶段工具定义数组
  */
@@ -284,10 +341,16 @@ export function createStageTools(
   };
   const imageParameters = Type.Object({
     ...sceneScopeParameters,
+    shotIds: Type.Optional(
+      Type.Array(Type.String({ minLength: 1 }), {
+        description:
+          '只重生成这些镜头（v2，如 ["sh-023"]）；省略表示全部镜头。与 sceneIds 互斥使用。',
+      }),
+    ),
     promptOverride: Type.Optional(
       Type.String({
         description:
-          "覆盖该场景的画面描述（纯视觉，不含文字）；只能配合单个 sceneIds 使用，用于单张精调",
+          "覆盖该镜头/场景的画面描述（纯视觉，不含文字）；只能配合单个 shotId 或 sceneId 使用",
       }),
     ),
     promptSet: Type.Optional(
@@ -310,19 +373,57 @@ export function createStageTools(
       Type.String({ description: "提示词集名（config/prompts/<集名>/）；缺省用配置默认集" }),
     ),
   });
-  const ttsParameters = Type.Object({ ...sceneScopeParameters });
+  const ttsParameters = Type.Object({
+    ...sceneScopeParameters,
+    shotIds: Type.Optional(
+      Type.Array(Type.String({ minLength: 1 }), {
+        description: '只重合成这些镜头（v2，如 ["sh-023"]）；省略表示全部镜头。',
+      }),
+    ),
+  });
+  // render_frames 只暴露 Profile；compose 的参数更丰富（字幕/BGM/响度），单独 schema
   const profileParameters = Type.Object({
     profile: Type.String({
       minLength: 1,
       description: "输出 Profile 名（config/profiles/ 下的文件目录名）",
     }),
   });
+  const composeParameters = Type.Object({
+    profile: Type.String({
+      minLength: 1,
+      description: "输出 Profile 名（config/profiles/ 下的文件目录名）",
+    }),
+    captions: Type.Optional(
+      Type.Boolean({
+        description: "是否烧录字幕轨（仅 v2 项目生效，默认烧录）；无字幕需求时传 false",
+      }),
+    ),
+    bgm: Type.Optional(
+      Type.String({
+        description: "背景音乐的项目资产 ID（assets/uploads/ 下已上传资产，不含路径）",
+      }),
+    ),
+    bgmVolume: Type.Optional(
+      Type.Number({
+        exclusiveMinimum: 0,
+        maximum: 1,
+        description: "BGM 音量，范围 (0,1]；缺省 0.2",
+      }),
+    ),
+    loudnessTarget: Type.Optional(
+      Type.Number({
+        minimum: -70,
+        maximum: -5,
+        description: "成片响度目标（LUFS），范围 [-70,-5]；缺省 -16",
+      }),
+    ),
+  });
 
   const copySpec: StageToolSpec<typeof copyParameters> = {
     name: "copy_generate",
     label: "文案生成",
     description:
-      "按主题生成分镜文案并写入项目内的 copy.json。这是七阶段流水线的第一步；入参只接受主题、风格与提示词集名，不接受任何路径。",
+      "按主题生成分镜文案并写入项目内的 copy.json。这是八阶段流水线的第一步；入参只接受主题、风格与提示词集名，不接受任何路径。",
     parameters: copyParameters,
     async run(params, ctx) {
       const result = await generateCopy({
@@ -330,11 +431,14 @@ export function createStageTools(
         topic: params.topic,
         style: params.style ?? ctx.style ?? "",
         promptSet: params.promptSet,
+        contractVersion: ctx.contractVersion,
         outFile: copyPath,
         runId: ctx.runId,
       });
       return {
-        summary: `已生成文案 copy.json，共 ${result.sceneCount} 个场景。`,
+        summary: result.shotCount
+          ? `已生成文案 copy.json，共 ${result.shotCount} 个镜头（${result.sceneCount} 个章节）。`
+          : `已生成文案 copy.json，共 ${result.sceneCount} 个场景。`,
         artifacts: ["copy.json"],
       };
     },
@@ -344,7 +448,7 @@ export function createStageTools(
     name: "image_generate",
     label: "配图生成",
     description:
-      "按 copy.json 的口播与画面描述逐场景生成配图，写入项目内的 images/ 并回填 copy.json。需先完成 copy_generate。用户只要求改某一张图时，必须传 sceneIds 只重画该场景（可用 promptOverride 给出新画面描述）；只有用户明确要求整体重做时才省略 sceneIds。",
+      "按 copy.json 的口播与画面描述逐场景（v1）或逐镜头（v2）生成配图，写入项目内的 images/ 并回填 copy.json。需先完成 copy_generate。用户只要求改某一张图时，必须传 sceneIds 或 shotIds 只重画目标（可用 promptOverride 给出新画面描述）；只有用户明确要求整体重做时才省略范围。",
     parameters: imageParameters,
     async run(params, ctx) {
       const result = await generateImages({
@@ -353,10 +457,25 @@ export function createStageTools(
         promptSet: params.promptSet,
         runId: ctx.runId,
         sceneIds: params.sceneIds,
+        shotIds: params.shotIds,
         promptOverride: params.promptOverride,
         mode: params.mode,
       });
       const artifacts = result.generated.map((sceneId) => `images/${sceneId}.png`);
+      // v2 资产绑定变化（方案 §7.2）：新生成并回填 imagePath 的镜头，驱动素材库计数刷新；
+      // 事件失败不影响工具结果
+      if (ctx.contractVersion === "2.0" && ctx.publishEvent && result.generated.length > 0) {
+        try {
+          ctx.publishEvent("asset.bound", {
+            shotIds: result.generated,
+            count: result.generated.length,
+          });
+        } catch (error) {
+          console.warn(
+            `[stage-tools] asset.bound 发布失败（不阻塞工具结果）：${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
       return {
         summary:
           artifacts.length > 0
@@ -371,7 +490,7 @@ export function createStageTools(
     name: "scene_generate",
     label: "场景生成",
     description:
-      "为每个场景生成 HTML+GSAP 动画页面，写入项目内的 scenes/ 并回填 copy.json。需先完成 copy_generate（有配图效果更好）。用户只要求改某个场景的动画时，必须传 sceneIds 只重做该场景（可用 promptOverride 描述期望的动画/视觉）；只有明确要求整体重做时才省略 sceneIds。",
+      "为每个镜头选择版式组件并填参，写入项目内的 scenes/spec.json。需先完成 copy_generate（有配图效果更好）。用户只要求改某个章节的动画时，必须传 sceneIds 只重做该章节（可用 promptOverride 描述期望的动画/视觉）；只有明确要求整体重做时才省略 sceneIds。",
     parameters: sceneParameters,
     async run(params, ctx) {
       const result = await generateScenes({
@@ -385,12 +504,13 @@ export function createStageTools(
         sceneIds: params.sceneIds,
         promptOverride: params.promptOverride,
       });
-      const artifacts = result.generated.map((sceneId) => `scenes/${sceneId}.html`);
       const fallbackNote =
-        result.fallbacks.length > 0 ? `，其中 ${result.fallbacks.length} 个场景使用了降级模板` : "";
+        result.fallbacks.length > 0
+          ? `，其中 ${result.fallbacks.length} 个镜头降级为关键词块`
+          : "";
       return {
-        summary: `已生成 ${artifacts.length} 个场景页面（scenes/）${fallbackNote}。`,
-        artifacts,
+        summary: `已生成 ${result.generated.length} 个镜头的场景规格（${SCENE_SPEC_RELATIVE_PATH}）${fallbackNote}。`,
+        artifacts: [SCENE_SPEC_RELATIVE_PATH],
       };
     },
   };
@@ -399,7 +519,7 @@ export function createStageTools(
     name: "tts_generate",
     label: "语音合成",
     description:
-      "按 copy.json 的逐场景口播合成语音，写入项目内的 audio/ 并回填 copy.json。需先完成 copy_generate。音色固定取配置 engines.endpoints.ark.tts_speaker，不接受入参覆盖。只重新配音某个场景时传 sceneIds，不要省略后整批重跑。",
+      "按 copy.json 的逐场景（v1）或逐镜头（v2）口播合成语音，写入项目内的 audio/ 并回填 copy.json；v2 同时产出 audio/cues.json。需先完成 copy_generate。音色固定取配置 engines.endpoints.ark.tts_speaker，不接受入参覆盖。只重新配音某个场景/镜头时传 sceneIds 或 shotIds，不要省略后整批重跑。",
     parameters: ttsParameters,
     async run(params, ctx) {
       const result = await generateSpeech({
@@ -407,6 +527,7 @@ export function createStageTools(
         copyPath,
         runId: ctx.runId,
         sceneIds: params.sceneIds,
+        shotIds: params.shotIds,
       });
       const artifacts = result.generated.map((sceneId) => `audio/${sceneId}.mp3`);
       return {
@@ -416,10 +537,26 @@ export function createStageTools(
     },
   };
 
+  const captionsSpec: StageToolSpec<typeof emptyParameters> = {
+    name: "captions_generate",
+    label: "字幕轨生成",
+    description:
+      "按 audio/cues.json 生成独立 ASS 字幕轨 captions/subtitle.ass（一条 cue 对应一条字幕，样式取项目主题快照）。需先完成 tts_generate（仅 v2 项目可用）。",
+    parameters: emptyParameters,
+    async run(_params, ctx) {
+      const result = generateCaptions({ projectDir: ctx.projectDir });
+      return {
+        summary: `已生成字幕轨 ${result.cueCount} 条（覆盖 ${result.shotCount} 个镜头，主题 ${result.themeId}）。`,
+        artifacts: [CAPTIONS_RELATIVE_PATH],
+      };
+    },
+  };
+
   const storyboardSpec: StageToolSpec<typeof emptyParameters> = {
     name: "storyboard_generate",
     label: "时间轴生成",
-    description: "用 ffprobe 实测各场景语音时长，生成项目内 timeline.json。需先完成 tts_generate。",
+    description:
+      "按 copy.json 生成 timeline.json：消费 audio/cues.json 生成镜头级时间轴。需先完成 tts_generate。",
     parameters: emptyParameters,
     async run(_params, ctx) {
       const result = await generateStoryboard({
@@ -427,6 +564,7 @@ export function createStageTools(
         copyPath,
         outFile: timelinePath,
         runId: ctx.runId,
+        profile: ctx.profile,
       });
       return {
         summary: `已生成时间轴 timeline.json，总时长 ${result.totalMs}ms。`,
@@ -439,39 +577,69 @@ export function createStageTools(
     name: "render_frames",
     label: "逐帧渲染",
     description:
-      "按 timeline.json 逐帧渲染 JPEG 帧序列到项目内的 build/render/<profile>/frames/。需先完成 storyboard_generate。",
+      "按 timeline.json 逐帧渲染 JPEG 帧序列（按镜头分目录）到项目内的 build/render/。需先完成 storyboard_generate。",
     parameters: profileParameters,
     timeoutMs: RENDER_TIMEOUT_MS,
     timeoutLabel: "render_frames",
     async run(params, ctx) {
       const profile = resolveOutputProfile(ctx.rootDir, params.profile);
-      const result = await renderFrames({
-        rootDir: ctx.rootDir,
-        copyPath,
-        timelinePath,
-        profile,
-        workers: renderWorkers,
-        runId: ctx.runId,
+      const input = prepareShotRenderInput(ctx.projectDir);
+      const profileDir = profile === "LANDSCAPE_1080P" ? "landscape" : "portrait";
+      const shotsDir = join(ctx.projectDir, "build", "render", profileDir, "shots");
+      const result = await renderShots({
+        entryPoint: join(ctx.rootDir, REMOTION_ENTRY_POINT),
+        timeline: input.timeline,
+        theme: input.theme,
+        specShots: input.specShots,
+        imageByShot: input.imageByShot,
+        publicDir: input.imagesDir,
+        outputDir: shotsDir,
+        concurrency: renderWorkers,
+        browserExecutable: ctx.config.tools.chromium_path || undefined,
       });
-      const artifact = toProjectRelative(ctx.projectDir, result.framesDir);
-      return { summary: `已渲染 ${result.frameCount} 帧（${artifact}/）。`, artifacts: [artifact] };
+      const artifact = toProjectRelative(ctx.projectDir, shotsDir);
+      // 预览帧可用（方案 §7.2）：驱动播放器/分镜页刷新；事件失败不影响工具结果
+      if (ctx.publishEvent) {
+        try {
+          ctx.publishEvent("preview.ready", {
+            shotIds: result.entries.map((entry) => entry.shotId),
+            totalFrames: result.totalFrames,
+            shotsDir: artifact,
+          });
+        } catch (error) {
+          console.warn(
+            `[stage-tools] preview.ready 发布失败（不阻塞工具结果）：${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+      return {
+        summary: `已渲染 ${result.totalFrames} 帧、${result.entries.length} 个镜头（${artifact}/）。`,
+        artifacts: [artifact],
+      };
     },
   };
 
-  const composeSpec: StageToolSpec<typeof profileParameters> = {
+  const composeSpec: StageToolSpec<typeof composeParameters> = {
     name: "compose_video",
     label: "视频合成",
-    description: "把帧序列与语音合成为项目内的 final.mp4（成片唯一名称）。需先完成 render_frames。",
-    parameters: profileParameters,
+    description:
+      "把帧序列与语音合成为项目内的 final.mp4（成片唯一名称）。v2 项目按镜头帧目录合成，默认烧录字幕（captions=false 关闭）；可选混入 BGM（传资产 ID）与响度目标。需先完成 render_frames。",
+    parameters: composeParameters,
     timeoutMs: COMPOSE_TIMEOUT_MS,
     timeoutLabel: "compose_video",
     async run(params, ctx) {
       const profile = resolveOutputProfile(ctx.rootDir, params.profile);
-      await composeVideoStep({
+      const bgmPath = params.bgm ? resolveBgmAsset(ctx.projectDir, params.bgm) : undefined;
+      // 镜头级帧目录 + ASS 烧录 + loudnorm
+      await composeVideoStepV2({
         rootDir: ctx.rootDir,
         copyPath,
         outFile: finalPath,
         profile,
+        bgmPath,
+        bgmVolume: params.bgmVolume,
+        loudnessTarget: params.loudnessTarget ?? -16,
+        burnCaptions: params.captions,
         runId: ctx.runId,
       });
       return { summary: "已合成成片 final.mp4。", artifacts: ["final.mp4"] };
@@ -483,6 +651,7 @@ export function createStageTools(
     imageSpec,
     sceneSpec,
     ttsSpec,
+    captionsSpec,
     storyboardSpec,
     renderSpec,
     composeSpec,

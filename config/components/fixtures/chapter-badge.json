@@ -1,0 +1,8 @@
+{
+  "componentId": "chapter-badge",
+  "props": {
+    "chapter": "02",
+    "title": "突触的秘密",
+    "subtitle": "信号如何在神经元之间传递"
+  }
+}

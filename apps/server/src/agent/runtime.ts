@@ -28,6 +28,12 @@ export interface CreateAgentRuntimeOptions {
   traceForActor?: (actor: Actor) => TraceStore;
   /** 会话事件出口（阶段执行与自由对话共用）；透传给会话注册表。 */
   onSessionEvent?: (sessionId: string, event: AgentSessionEvent) => void;
+  /** 项目级事件出口（T204 的 asset.bound / preview.ready）；透传给会话注册表。 */
+  onProjectEvent?: (
+    sessionId: string,
+    type: string,
+    payload: Record<string, unknown>,
+  ) => void;
   /** 覆盖 SDK 端口（测试用）；透传给会话注册表。 */
   port?: AgentSdkPort;
   idleTimeoutMs?: number;

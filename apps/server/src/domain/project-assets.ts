@@ -30,12 +30,13 @@ const UPLOAD_TYPES: ReadonlyArray<{
   { extensions: [".ogg"], mimeType: "audio/ogg", kind: "audio" },
 ];
 
-/** 流水线阶段到统一项目资产类型的映射。 */
+/** 流水线阶段到统一项目资产类型的映射（caption 字幕轨归入时间轴类资产）。 */
 const GENERATED_STAGE_KINDS: Readonly<Record<PipelineStage, ProjectAssetKind>> = {
   copy: "copy",
   image: "image",
   scene: "scene",
   tts: "audio",
+  captions: "timeline",
   storyboard: "timeline",
   render: "frames",
   compose: "video",

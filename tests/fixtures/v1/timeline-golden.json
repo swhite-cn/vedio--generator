@@ -1,0 +1,8 @@
+{
+  "entries": [
+    { "sceneId": "s1", "durationMs": 3000, "startMs": 0, "endMs": 3000 },
+    { "sceneId": "s2", "durationMs": 4200, "startMs": 3000, "endMs": 7200 },
+    { "sceneId": "s3", "durationMs": 2800, "startMs": 7200, "endMs": 10000 }
+  ],
+  "totalMs": 10500
+}

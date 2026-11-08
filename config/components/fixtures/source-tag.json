@@ -1,0 +1,7 @@
+{
+  "componentId": "source-tag",
+  "props": {
+    "label": "CERN 公开资料",
+    "note": "数据截至 2024 年"
+  }
+}

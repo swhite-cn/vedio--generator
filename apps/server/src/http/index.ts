@@ -11,7 +11,14 @@ import { registerMediaRoutes } from "./routes/media.js";
 import { registerProfileRoutes } from "./routes/profiles.js";
 import { registerAdminRoutes } from "./routes/admin.js";
 import { registerAssetRoutes } from "./routes/assets.js";
+import { registerStoryboardRoutes } from "./routes/storyboard.js";
+import { registerShotRoutes } from "./routes/shots.js";
+import { registerStyleAnchorRoutes } from "./routes/style-anchors.js";
 import { registerAgentActionRoutes } from "./routes/agent-actions.js";
+import { registerCatalogRoutes } from "./routes/catalog.js";
+import { registerQualityRoutes } from "./routes/quality.js";
+import { registerPlayerRoutes } from "./routes/player.js";
+import { registerSearchRoutes } from "./routes/search.js";
 
 /**
  * 注册全部 HTTP 路由与统一错误处理。
@@ -25,12 +32,19 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpDeps): void {
   registerAuthRoutes(app, deps);
   registerCapabilityRoutes(app, deps);
   registerProjectRoutes(app, deps);
+  registerStoryboardRoutes(app, deps);
+  registerShotRoutes(app, deps);
+  registerStyleAnchorRoutes(app, deps);
   registerAssetRoutes(app, deps);
   registerAgentActionRoutes(app, deps);
+  registerCatalogRoutes(app, deps);
+  registerQualityRoutes(app, deps);
+  registerPlayerRoutes(app, deps);
   registerSessionRoutes(app, deps);
   registerRunRoutes(app, deps);
   registerArtifactRoutes(app, deps);
   registerMediaRoutes(app, deps);
   registerProfileRoutes(app, deps);
+  registerSearchRoutes(app, deps);
   registerAdminRoutes(app, deps);
 }

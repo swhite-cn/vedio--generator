@@ -2,7 +2,7 @@
 
 本文面向希望在本机启动 VideoForge、通过工作台跑"主题 → 成片"或检查运行留痕的操作者。安装与开发细节见[开发者使用说明](developer-guide.md)。
 
-> **重要：真实 Ark 服务的端到端冒烟尚未验收。** 服务、工作台与七阶段工作流已可用，但需要在 `config/system.local.yaml` 填真实 `chat_model`、在 `.env.local` 或环境变量中配置 `ARK_API_KEY` 与 `JWT_SECRET` 后人工验证一次完整链路。
+> **重要：真实 Ark 服务的端到端冒烟尚未验收。** 服务、工作台与八阶段工作流已可用，但需要在 `config/system.local.yaml` 填真实 `chat_model`、在 `.env.local` 或环境变量中配置 `ARK_API_KEY` 与 `JWT_SECRET` 后人工验证一次完整链路。
 
 ## 1. 当前可以做什么
 
@@ -63,9 +63,11 @@ pnpm run web:dev
 
 ## 4. 初次登录
 
+登录页不提供自助注册：账号统一由管理员创建（「管理 → 用户」或 CLI），登录失败与「忘记密码」均在表单内行内提示，不弹窗。勾选「记住我」时登录态持久保存，不勾选则关闭浏览器后失效。
+
 1. 用户名 `admin`，口令为内置初始口令或 `VF_ADMIN_INITIAL_PASSWORD` 指定的值。
 2. 首次登录会被强制跳到「设置」页并提示"首次登录请先修改初始密码 / 修改成功前，其他页面暂不可访问"。
-3. 修改成功后自动进入项目列表。此后初始口令不再可用。
+3. 修改成功后自动进入能力中心（默认首页）。此后初始口令不再可用。
 4. 忘记口令时，在仓库根目录执行本机救援：
 
 ```powershell
@@ -78,7 +80,7 @@ pnpm --filter @videoforge/cli start db:user --reset-password admin
 
 ### 5.1 新建项目
 
-1. 打开「项目」页 → 新建项目。
+1. 进入能力中心（登录后的默认首页），在「短视频生成」卡片点击「创建项目」（项目列表页同样提供新建入口）。
 2. 第一步选择能力（当前仅「短视频生成」）。
 3. 第二步填写项目名称、主题、风格，并选择输出 Profile（横屏 1080p / 竖屏 1080p）。
 
@@ -90,7 +92,7 @@ pnpm --filter @videoforge/cli start db:user --reset-password admin
 
 - **页头**：项目名、能力、项目状态、run 状态，以及「发起 run」「取消 run」「查看 Trace」。
 - **对话**：agent 的流式输出与工具调用卡片。
-- **进度**：七阶段竖排步骤条（`文案 → 配图 → 场景 → 音频 → 时间轴 → 渲染 → 合成`），显示每次尝试与耗时。
+- **进度**：八阶段竖排步骤条（`文案 → 配图 → 场景 → 音频 → 字幕 → 时间轴 → 渲染 → 合成`），显示每次尝试与耗时。
 - **产物**：六个 Tab（文案 / 图片 / 场景 / 音频 / 时间轴 / 成片）；未生成的产物显示空态。
 - **项目资产**：右侧可搜索、引用已有产物与手工上传素材，聊天框用 `@` 直接引用。
 
@@ -120,7 +122,7 @@ pnpm --filter @videoforge/cli start db:user --reset-password admin
 
 点击工作台「查看 Trace」进入 `/runs/:id/trace`：
 
-- 左侧为七阶段步骤条（同一阶段多次重试会折叠为一行，并显示尝试次数与耗时）。
+- 左侧为八阶段步骤条（同一阶段多次重试会折叠为一行，并显示尝试次数与耗时）。
 - 右侧为选中阶段的工具调用 / LLM 调用明细，分页直达后端分页参数。
 - admin 从「管理」页进入时数据来源为 admin 接口，返回链接回到「管理」。
 
@@ -154,10 +156,12 @@ pnpm --filter @videoforge/cli start project:verify --project <项目 id>
 | `chat_model` 仍为占位值               | 在 `config/system.local.yaml` 填真实语言模型 ID       |
 | `ADAPTER_PROTOCOL_INVALID`            | 模型输出不是合法 JSON；重试该阶段                     |
 | `ADAPTER_FAILED` / `TOOL_UNAVAILABLE` | 检查网络、密钥权限、ffmpeg/ffprobe 与 Chrome 是否可用 |
+| 旧项目报 `CONFIG_INVALID`（契约版本 1.0） | v2 重构已移除 legacy 渲染通道，契约版本 1.0 的旧项目无法续跑；**发起 run 时即被拦截**并给出迁移提示，请用当前版本新建项目重新生成（`project:verify` 也会输出契约版本与同一提示） |
 
 ## 8. 当前限制
 
 - **真实 Ark 端到端尚未验收**：单元测试全部 mock，首次真实链路需要人工验证。
+- **旧项目（契约版本 1.0）不可续跑**：legacy 渲染通道（Playwright + GSAP 场景寻帧）已在 v2 重构的 M5 阶段移除，**在工作台「发起 run」时即报 `CONFIG_INVALID`（携带迁移提示）**；即使绕过入口，scene / storyboard / render / compose 阶段也会明确失败。请用当前版本新建项目重新生成。新项目一律使用 Remotion，无需也不支持任何渲染通道开关。`pnpm --filter @videoforge/cli start project:verify --project <名>` 会输出项目契约版本，对 v1 项目给出同一迁移提示。
 - **取消 run 不终止在途阶段**：取消后 run 立即变为「已取消」，但正在执行的阶段仍会跑完；该阶段结束后可能把 run 覆盖为「失败」，且工作台在阶段结束前仍显示该阶段「运行中」。此问题已登记，待工作流引擎后续修正。
 - **trace「事件」Tab 无数据**：服务端暂未提供事件列表查询路由。
 - **admin 项目列表状态恒为「草稿」**：该接口不做项目状态推导，属已知偏差。

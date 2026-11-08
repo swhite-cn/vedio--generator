@@ -17,6 +17,7 @@ const STAGE_TOOL_AND_LABEL: Record<PipelineStage, { tool: string; label: string 
   image: { tool: "image_generate", label: "配图生成" },
   scene: { tool: "scene_generate", label: "场景生成" },
   tts: { tool: "tts_generate", label: "语音合成" },
+  captions: { tool: "captions_generate", label: "字幕轨生成" },
   storyboard: { tool: "storyboard_generate", label: "时间轴生成" },
   render: { tool: "render_frames", label: "逐帧渲染" },
   compose: { tool: "compose_video", label: "视频合成" },
@@ -26,7 +27,11 @@ const STAGE_TOOL_AND_LABEL: Record<PipelineStage, { tool: string; label: string 
 const REVIEW_GATE_SET: ReadonlySet<string> = new Set(REVIEW_GATE_STAGES);
 
 /**
- * 构造 `video-generation` 的七阶段声明，每阶段带上产物判据（见设计文档 §3.6、§6.1）。
+ * 构造 `video-generation` 的八阶段声明，每阶段带上 v2 产物判据（见设计文档 §3.6、重构方案 §4.4）。
+ *
+ * 判据取「结构可校验」而非仅文件存在（T112）：copy 必须是契约 v2、cue 必须覆盖全部口播、
+ * 字幕条数必须等于 cue 条数、SceneSpec 必须覆盖全部镜头、timeline 必须是合法 v2。
+ * 受控偏差：`tts` 阶段以 `audio/cues.json` 的 cue 覆盖结构校验为准，不再单独断 `audio/*.mp3` 计数。
  * @returns 按阶段顺序排列的阶段声明数组
  */
 function buildVideoGenerationStages(): CapabilityStageDeclaration[] {
@@ -37,18 +42,37 @@ function buildVideoGenerationStages(): CapabilityStageDeclaration[] {
       case "copy":
         return {
           ...base,
-          artifact: { kind: "file", relativePath: "copy.json", validator: "copy-contract" },
+          artifact: { kind: "file", relativePath: "copy.json", validator: "copy-contract-v2" },
         };
       case "image":
         return { ...base, artifact: { kind: "glob", pattern: "images/*.png", minCount: 1 } };
       case "scene":
-        return { ...base, artifact: { kind: "glob", pattern: "scenes/*.html", minCount: 1 } };
+        return {
+          ...base,
+          artifact: { kind: "file", relativePath: "scenes/spec.json", validator: "scene-spec" },
+        };
       case "tts":
-        return { ...base, artifact: { kind: "glob", pattern: "audio/*.mp3", minCount: 1 } };
+        return {
+          ...base,
+          artifact: { kind: "file", relativePath: "audio/cues.json", validator: "audio-cues" },
+        };
+      case "captions":
+        return {
+          ...base,
+          artifact: {
+            kind: "file",
+            relativePath: "captions/subtitle.ass",
+            validator: "captions-ass",
+          },
+        };
       case "storyboard":
         return {
           ...base,
-          artifact: { kind: "file", relativePath: "timeline.json", validator: "timeline-contract" },
+          artifact: {
+            kind: "file",
+            relativePath: "timeline.json",
+            validator: "timeline-contract-v2",
+          },
         };
       case "render":
         return {
@@ -73,7 +97,8 @@ export const BUILT_IN_CAPABILITIES: CapabilityDeclaration[] = [
   {
     id: "video-generation",
     name: "短视频生成",
-    description: "从主题到成片的七阶段线性流水线：文案、配图、场景、语音、时间轴、渲染、合成。",
+    description:
+      "从主题到成片的八阶段线性流水线：文案、配图、场景、语音、字幕、时间轴、渲染、合成。",
     stages: buildVideoGenerationStages(),
     reviewGates: [...REVIEW_GATE_STAGES],
     params: [

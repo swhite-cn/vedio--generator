@@ -4,9 +4,9 @@
 
 ## 项目现状
 
-VideoForge 是面向 Windows 本机使用的 pnpm monorepo，当前为**轻量本地 harness（单进程）**。核心链路是「能力 → 项目 → run」：`apps/server`（Fastify）按能力注册表驱动七阶段确定性工作流（`copy → image → scene → tts → storyboard → render → compose`），内嵌 Pi agent 运行时执行阶段工具，三级 trace（`run_stages` / `tool_calls` / `llm_calls` + `trace.jsonl`）留痕；`apps/web` 是 Ant Design Vue 工作台（只读渲染服务端数据，不推导状态机）；`apps/cli` 是运维入口（`doctor`/`status`/`db:migrate`/`db:user`/`storage:prune`/`project:verify`）。
+VideoForge 是面向 Windows 本机使用的 pnpm monorepo，当前为**轻量本地 harness（单进程）**。核心链路是「能力 → 项目 → run」：`apps/server`（Fastify）按能力注册表驱动八阶段确定性工作流（`copy → image → scene → tts → captions → storyboard → render → compose`），内嵌 Pi agent 运行时执行阶段工具，三级 trace（`run_stages` / `tool_calls` / `llm_calls` + `trace.jsonl`）留痕；`apps/web` 是 Ant Design Vue 工作台（只读渲染服务端数据，不推导状态机）；`apps/cli` 是运维入口（`doctor`/`status`/`db:migrate`/`db:user`/`storage:prune`/`project:verify`）。
 
-七个阶段均有单测（Ark HTTP、ffprobe/ffmpeg、Chromium 全部 mock）。审核点固定在 `copy`、`image` 之后；新建项目时服务端同步建会话、首个 run 并异步触发工作流。
+八个阶段均有单测（Ark HTTP、ffprobe/ffmpeg、Chromium 全部 mock）。审核点固定在 `copy`、`image` 之后；新建项目时服务端同步建会话、首个 run 并异步触发工作流。
 
 已知边界（不要把以下能力描述成已上线）：
 
@@ -15,24 +15,27 @@ VideoForge 是面向 Windows 本机使用的 pnpm monorepo，当前为**轻量�
 - trace 页「事件」Tab 的时间线由 `buildRunEvents` 用 `runs` / `run_stages` / `tool_calls` / `llm_calls` 合成，**不是**原始 SSE 事件流（设计文档不建 events 表）。`GET /api/admin/projects` 已按 `deriveProjectStatus` + 成品存在性推导真实状态。
 - `tool_calls` / `llm_calls` 均按 run / 阶段归属：工具调用由引擎注入会话阶段上下文，LLM 调用由 provider 按 `streamOptions.sessionId` 反查会话留痕目标；`trace.jsonl` 同时写入 `tool_call` / `llm_call` / `run_stage` 三类行。
 - 新建项目 Modal 的输出 Profile 来自 `GET /api/profiles`（读取 `config/profiles/*.yaml`）；接口失败时回退前端两项默认值。
+- 审核点固定为 `copy`、`image` 之后（`REVIEW_GATE_STAGES`）；方案 §4.4 曾提及的 `scene` 审核点**本轮不做**。
+- 契约 1.0 的存量项目不可续跑（legacy 渲染通道已移除）；`project:verify` 会给出迁移提示并判不通过，需用当前版本新建项目重新生成。
 - 服务端仅监听 `127.0.0.1`，不构成可对外部署的服务。
 
 ## 技术栈与目录
 
-- `apps/web`：Vue 3、Vite、Vue Router、Pinia、Ant Design Vue 4（全量注册 + `ConfigProvider` zhCN）；页面为 `/login`、`/capabilities`、`/projects`、`/projects/:id`（工作台）、`/runs/:id/trace`、`/settings`、`/admin`。
+- `apps/web`：Vue 3、Vite、Vue Router、Pinia、Ant Design Vue 4（全量注册 + `ConfigProvider` zhCN）；页面为 `/login`、`/`（能力中心，旧 `/capabilities` 重定向）、`/projects`、`/projects/:id`（工作台）、`/projects/:id/storyboard`（分镜编辑器）、`/projects/:id/runs/:runId`（Run 详情）、`/runs/:id/trace`（301 到 Run 详情）、`/assets`、`/components`、`/settings`、`/admin`。
 - `apps/server`：Node.js、TypeScript、Fastify 5，按职责分层：
-  - `src/http`：REST 路由（auth / capabilities / projects / sessions / runs / trace / artifacts / media / admin）、SSE 事件总线与票据、鉴权钩子、统一错误处理。
-  - `src/domain`：项目状态推导、存储布局。
+  - `src/http`：REST 路由（auth / capabilities / projects / storyboard / shots / style-anchors / assets / agent-actions / catalog / quality / player / sessions / runs / artifacts / media / profiles / search / admin）、SSE 事件总线与票据、鉴权钩子、统一错误处理。
+  - `src/domain`：项目状态/指标推导、契约与存储布局、项目资产、质量门、镜头补丁与渲染输入。
   - `src/agent`：Pi 运行时装配、Ark provider、阶段工具、内置工具、提示词、技能加载、会话注册表。
   - `src/workflow`：能力注册表、run/阶段状态机、引擎主循环、审核点、重试、断点续跑、租约与中断恢复。
   - `src/trace`：三级留痕、脱敏器、结构化日志。
   - `src/db`：SQLite、Drizzle schema、迁移、actor-first 仓储。
 - `apps/cli`：命令行运维入口（tsx 直跑，无构建步骤）。
-- `packages/shared`：领域类型（含 `PIPELINE_STAGES`、`REVIEW_GATE_STAGES`）、能力注册表、错误码。
-- `packages/pipeline`：配置、Ark 客户端、ffmpeg/ffprobe、文案/生图/TTS/时间轴/合成能力、`path-safety`。
-- `packages/renderer`：Playwright 单场景与多场景连续帧渲染。
-- `packages/template-sdk`：场景契约、内置动画模板、Profile、GSAP 供应商。
-- `config`：默认配置、本机配置模板、提示词集、输出 Profile。
+- `apps/player`：React + `@remotion/player` 单镜预览器（构建为 IIFE bundle，由服务端内联数据页面引用）。
+- `packages/shared`：领域类型（含 `PIPELINE_STAGES`、`REVIEW_GATE_STAGES`）、v2 契约（`contracts/`：copy / scene-spec / timeline / theme / component / quality）、能力注册表、错误码。
+- `packages/pipeline`：配置、Ark 客户端、ffmpeg/ffprobe、文案/生图/场景/语音/字幕/时间轴/合成能力、质量检查、`path-safety`。
+- `packages/remotion-engine`：Remotion 帧驱动渲染底座（主题解析、组件装配、`renderShots`/`renderShotStill`）。
+- `packages/template-sdk`：输出 Profile（`getProfile`）与组件注册表（v2 装配读取的组件规格与 preview fixture）。
+- `config`：默认配置、本机配置模板、提示词集（v1/v2 两套系统提示词）、输出 Profile、主题（`themes/`）与组件 fixture（`components/fixtures/`）。
 - `tests`：Vitest 单元测试（`tests/integration` 为真机冒烟，默认排除）。
 - `.trae/skills`：可选的 agent skill 扩展点（当前为空）；运行时会按目录是否存在注入，不存在不报错。
 
@@ -50,6 +53,7 @@ pnpm build
 pnpm run server:dev
 pnpm run web:dev
 pnpm test:smoke
+pnpm test:bench
 ```
 
 启动 API 前必须提供 `JWT_SECRET`（≥32 字符），否则启动即报 `CONFIG_INVALID`：
@@ -67,7 +71,7 @@ API 与 Web 需在两个独立终端启动。仓库当前没有统一 lint 命�
 - 火山方舟配置在 `engines.endpoints.ark`：`base_url` 必须保持 `https://ark.cn-beijing.volces.com/api/plan/v3`（改为 `/api/v3` 会产生额外费用）；`chat_model` 默认为占位值 `PLEASE_FILL_CHAT_MODEL_ID`，填真实 ID 前 copy 阶段会拒绝执行。
 - 密钥只允许出现在仓库根目录 `.env.local`（`ARK_API_KEY`、`JWT_SECRET`）或同名系统环境变量中；`.env.local`、本机配置、SQLite 数据和生成工件均已 gitignore 且不得提交。不要读取、输出或复制密钥到日志、数据库或 manifest。
 - YAML 新增叶子字段时，添加用途注释；注明单位/范围、空值默认行为，以及路径或敏感值的安全边界。
-- `copy`/`image`/`scene` 的模型提示词已配置化：`config/prompts/<集名>/` 下 `copy-system.txt`、`image-suffix.txt`、`scene-system.txt` 三个模板文件构成一套提示词集，支持 `{style}`、`{width}`、`{height}` 变量与单文件缺失回退内置默认；默认集由配置 `prompts.default_set` 决定（缺省 `default`）；显式指定不存在的集报 `CONFIG_INVALID`。修改提示词行为优先改模板文件，不要在阶段工具里重新硬编码长提示词。
+- `copy`/`image`/`scene` 的模型提示词已配置化：`config/prompts/<集名>/` 下 `copy-system.txt`、`copy-v2-system.txt`（v2 文案：一句一镜 / 风格锚 / 来源）、`image-suffix.txt`、`scene-system.txt`、`scene-v2-system.txt`（v2 场景选型）五个模板文件构成一套提示词集，支持 `{style}`、`{width}`、`{height}` 变量与单文件缺失回退内置默认；默认集由配置 `prompts.default_set` 决定（缺省 `default`）；显式指定不存在的集报 `CONFIG_INVALID`。修改提示词行为优先改模板文件，不要在阶段工具里重新硬编码长提示词。
 - API 端口从配置读取。Web 开发环境由 `apps/web/vite-server-config.ts` 配置 Vite 代理。
 - API 与 SSE 客户端使用相对路径；不要在 `apps/web/src/services/api.ts` 或 `sse.ts` 硬编码主机名或端口。只有确有部署需求时才使用已有的 `VITE_API_BASE` 覆盖。
 - API 端口可配置不代表服务已开放外网监听；当前监听边界以服务代码为准（127.0.0.1），禁止擅自改成公网绑定。

@@ -1,10 +1,10 @@
 <script setup lang="ts">
 /**
- * 工作台（Web 专题 §5.4，核心页）：单项目的全部操作面——对话、阶段进度、审核、产物、run 控制。
+ * 工作台（方案 §8.5 第 5 页，核心页）：单项目的全部操作面。
  *
- * 布局：页头（返回 + 项目名 + 能力/项目/run 状态 + 发起/取消/查看 Trace）+ 左对话流 + 右上阶段进度 +
- * 右下产物面板 + 底部输入框；`<900px` 时右侧两块与对话流合并为顶部 Tab。
- * 状态一律来自 `workbench` store（纯 reducer + SSE），本页只做渲染与交互编排，不推导状态机。
+ * 布局：页头（返回/项目名/能力/项目状态/run 状态/操作）+ 左对话流 + 右侧 4 Tab
+ * （阶段进度 / 分镜 / 项目资产 / 流水线产物）。`<900px` 时改为「对话 / 阶段 / 分镜 / 资产 / 产物」
+ * 顶部切换。状态一律来自 `workbench` store（纯 reducer + SSE），页面只做渲染与交互编排。
  */
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
@@ -15,13 +15,17 @@ import { useAssetsStore } from "../stores/assets";
 import { useCapabilitiesStore } from "../stores/capabilities";
 import { formatApiError } from "../services/api";
 import type { ResumePayload } from "../components/review-logic";
-import { buildChatItems } from "../components/chat-grouping";
-import type { ChatItem } from "../components/chat-grouping";
-import StageSteps from "../components/StageSteps.vue";
-import ArtifactTabs from "../components/ArtifactTabs.vue";
+import { buildChatItems, type ChatItem } from "../components/chat-grouping";
+import {
+  mapProjectStatus,
+  mapRunStatus,
+  statusTone,
+} from "../components/state-mapping";
+import WorkbenchTabs from "../components/WorkbenchTabs.vue";
 import MessageBubble from "../components/MessageBubble.vue";
 import ToolGroup from "../components/ToolGroup.vue";
-import StateTag from "../components/StateTag.vue";
+import VfPill from "../components/ui/VfPill.vue";
+import VfButton from "../components/ui/VfButton.vue";
 
 const route = useRoute();
 const router = useRouter();
@@ -31,11 +35,11 @@ const capabilities = useCapabilitiesStore();
 
 /** 当前项目 id（来自路由参数）。 */
 const projectId = computed(() => String(route.params.id ?? ""));
-/** 产物面板当前 Tab（受控）。 */
-const activeTab = ref("copy");
-/** 窄屏下顶部 Tab 的当前项（对话 / 进度 / 产物）。 */
+/** 右侧 Tab 当前项。 */
+const activeTab = ref("stage");
+/** 窄屏顶部 Tab（chat 或右侧 Tab key）。 */
 const narrowTab = ref("chat");
-/** 是否处于窄屏（<900px，右侧两块并入顶部 Tab）。 */
+/** 是否窄屏（<900px）。 */
 const isNarrow = ref(false);
 /** 输入框草稿。 */
 const draft = ref("");
@@ -47,7 +51,6 @@ const uploadInputRef = ref<HTMLInputElement | null>(null);
 const listRef = ref<HTMLElement | null>(null);
 /** 用户是否停留在底部（上翻时不强跳）。 */
 let stickToBottom = true;
-
 let mediaQuery: MediaQueryList | null = null;
 
 /** 能力中文名（未命中回退能力 id）。 */
@@ -58,7 +61,19 @@ const capabilityName = computed(
     "",
 );
 
-/** 待审核阶段（run 处于 waiting_review 时高亮步骤条对应阶段）。 */
+/** 项目状态展示。 */
+const projectStatus = computed(() =>
+  workbench.project ? mapProjectStatus(workbench.project.status) : null,
+);
+
+/** run 状态展示。 */
+const runStatus = computed(() =>
+  workbench.currentRun
+    ? mapRunStatus(workbench.currentRun.status, workbench.currentRun.error_code)
+    : null,
+);
+
+/** 待审核阶段。 */
 const reviewStage = computed(() =>
   workbench.currentRun?.status === "waiting_review" ? workbench.currentRun.current_stage : null,
 );
@@ -68,17 +83,14 @@ const forbidden = computed(
   () => (workbench.loadError as { code?: string } | null)?.code === "AUTH_FORBIDDEN",
 );
 
-/** 页头「查看 Trace」是否可用（须存在最近一次 run）。 */
-const traceEnabled = computed(() => Boolean(workbench.currentRun?.id));
-
-/** 输入框占位提示：run 活跃时提示可继续自由对话（§5.4.2）。 */
+/** 输入框占位提示。 */
 const inputPlaceholder = computed(() =>
   workbench.runActive
-    ? "任务运行中，可随时与 agent 讨论…"
+    ? "任务运行中，可随时与 agent 讨论…（Enter 发送，Shift+Enter 换行）"
     : "输入消息，Enter 发送，Shift+Enter 换行",
 );
 
-/** 发送按钮是否禁用。 */
+/** 发送按钮禁用。 */
 const sendDisabled = computed(
   () => workbench.sending || draft.value.trim().length === 0 || !workbench.session,
 );
@@ -91,33 +103,33 @@ const selectedAssets = computed(() =>
   }),
 );
 
-/**
- * 流式刷新令牌：`text_delta` 追加到最后一条气泡但不改变消息数量，
- * 故用「消息数 + 末条文本长度 + 末条工具状态」的复合键驱动滚动锚定。
- */
+/** 可引用的资产选项（排除已选）。 */
+const assetOptions = computed(() =>
+  assets.items.filter((asset) => !selectedAssetIds.value.includes(asset.id)),
+);
+
+/** 流式刷新令牌（驱动滚动锚定）。 */
 const streamTick = computed(() => {
   const list = workbench.messages;
   const last = list[list.length - 1];
   return `${list.length}:${last?.text?.length ?? 0}:${last?.tool?.status ?? ""}`;
 });
 
-/** 渲染项：连续的内置工具调用折叠为一个工具组，其余逐条渲染。 */
+/** 渲染项：连续内置工具折叠为工具组。 */
 const chatItems = computed(() => buildChatItems(workbench.messages));
 
 /**
- * 取渲染项对应的阶段（工具组取首条卡片）。
+ * 取渲染项对应阶段。
  * @param item 渲染项
  * @returns 阶段标识
  */
 function itemStage(item: ChatItem): string {
-  if (item.kind === "toolGroup") {
-    return item.items[0]?.tool?.stage ?? "";
-  }
+  if (item.kind === "toolGroup") return item.items[0]?.tool?.stage ?? "";
   return item.message.tool?.stage ?? "";
 }
 
 /**
- * 计算窄屏断点。
+ * 窄屏断点变化。
  * @param event 媒体查询对象或事件
  */
 function handleMediaChange(event: MediaQueryListEvent | MediaQueryList): void {
@@ -127,12 +139,10 @@ function handleMediaChange(event: MediaQueryListEvent | MediaQueryList): void {
 /** 滚动到对话流底部。 */
 function scrollToBottom(): void {
   const el = listRef.value;
-  if (el) {
-    el.scrollTop = el.scrollHeight;
-  }
+  if (el) el.scrollTop = el.scrollHeight;
 }
 
-/** 记录用户是否停留在底部（上翻时不强跳）。 */
+/** 记录是否停留在底部。 */
 function onListScroll(): void {
   const el = listRef.value;
   if (!el) return;
@@ -140,18 +150,16 @@ function onListScroll(): void {
 }
 
 /**
- * 点击步骤条阶段：滚动定位到该阶段的首个工具卡片锚链（不提供跳转操作）。
+ * 点击阶段：滚动定位到对话流中该阶段的首个工具卡片。
  * @param stage 阶段标识
  */
 function scrollToStage(stage: string): void {
   const el = listRef.value?.querySelector(`[data-stage="${stage}"]`);
-  if (el instanceof HTMLElement) {
-    el.scrollIntoView({ block: "nearest" });
-  }
+  if (el instanceof HTMLElement) el.scrollIntoView({ block: "nearest" });
 }
 
 /**
- * 加载更早的历史消息，并保持当前视口内容不因前置插入而跳动。
+ * 加载更早历史消息并保持视口。
  */
 async function onLoadEarlier(): Promise<void> {
   const el = listRef.value;
@@ -160,17 +168,13 @@ async function onLoadEarlier(): Promise<void> {
   try {
     await workbench.loadEarlier();
   } catch {
-    // store 已统一提示（formatApiError），此处保持原视口不动
     return;
   }
   await nextTick();
-  if (el) {
-    // 前置插入会推高 scrollHeight，补偿差值即可让原首条消息停在原位
-    el.scrollTop = el.scrollHeight - previousHeight + previousTop;
-  }
+  if (el) el.scrollTop = el.scrollHeight - previousHeight + previousTop;
 }
 
-/** 加载工作台数据（失败时由 `loadError` 渲染 `Result`）。 */
+/** 加载工作台数据。 */
 async function load(): Promise<void> {
   try {
     await workbench.load(projectId.value);
@@ -188,32 +192,46 @@ async function send(): Promise<void> {
     draft.value = "";
     selectedAssetIds.value = [];
   } catch {
-    // store 已统一提示（formatApiError），此处仅保留草稿
+    // store 已统一提示
   }
 }
 
 /**
- * 从产物面板发起定向重生成：把范围写进草稿，交给 Agent 按最小范围执行。
- * 不直接调用生成接口，保证仍然经过 Agent 与三级留痕。
- * @param payload 目标阶段与场景 ID
+ * 从产物面板发起定向重生成：写入草稿交给 Agent 执行。
+ * @param payload 目标阶段与镜头 ID（v2 产物按镜头粒度归属）
  */
-function prefillRegeneration(payload: { stage: "image" | "scene" | "tts"; sceneId: string }): void {
-  const label =
-    payload.stage === "image" ? "配图" : payload.stage === "scene" ? "场景动画" : "配音";
-  draft.value = `只重新生成场景 ${payload.sceneId} 的${label}，不要改动其它场景。请先读取 manifest/generations.jsonl 中该场景最新的生成记录，在其提示词基础上增量调整。`;
+function prefillRegeneration(payload: { stage: "image" | "scene" | "tts"; shotId: string }): void {
+  const label = payload.stage === "image" ? "配图" : payload.stage === "scene" ? "场景版式" : "配音";
+  draft.value = `只重新生成镜头 ${payload.shotId} 的${label}，不要改动其它镜头。请先读取 manifest/generations.jsonl 中该镜头最新的生成记录，在其提示词基础上增量调整。`;
   if (isNarrow.value) narrowTab.value = "chat";
 }
 
-/** 添加一个资产到当前草稿引用，重复选择自动忽略。 */
+/**
+ * 引用一个资产到当前草稿，重复选择忽略。
+ * @param assetId 资产 id
+ */
 function addAssetReference(assetId: string): void {
   if (!selectedAssetIds.value.includes(assetId)) {
     selectedAssetIds.value = [...selectedAssetIds.value, assetId];
   }
 }
 
-/** 从当前草稿中移除一个资产引用，不影响项目资产本身。 */
+/**
+ * 移除草稿中的资产引用。
+ * @param assetId 资产 id
+ */
 function removeAssetReference(assetId: string): void {
   selectedAssetIds.value = selectedAssetIds.value.filter((id) => id !== assetId);
+}
+
+/**
+ * 原生 select 变更后引用资产并复位选择器。
+ * @param event change 事件
+ */
+function onSelectAsset(event: Event): void {
+  const select = event.target as HTMLSelectElement;
+  if (select.value) addAssetReference(select.value);
+  select.value = "";
 }
 
 /** 打开系统文件选择器。 */
@@ -221,7 +239,10 @@ function chooseUpload(): void {
   uploadInputRef.value?.click();
 }
 
-/** 上传用户选择的单个项目素材，成功后自动加入草稿引用。 */
+/**
+ * 上传用户选择的单个项目素材，成功后自动加入草稿引用。
+ * @param event 文件输入事件
+ */
 async function onUpload(event: Event): Promise<void> {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
@@ -241,7 +262,7 @@ async function onUpload(event: Event): Promise<void> {
  * @param event 键盘事件
  */
 function onPressEnter(event: KeyboardEvent): void {
-  if (event.shiftKey) return;
+  if (event.shiftKey || event.isComposing) return;
   event.preventDefault();
   void send();
 }
@@ -256,22 +277,20 @@ function onCancelRun(): void {
   void workbench.cancelRun().catch(() => undefined);
 }
 
-/** 跳转最近一次 run 的 Trace 视图。 */
-function goTrace(): void {
-  const id = workbench.currentRun?.id;
-  if (id) {
-    void router.push(`/runs/${id}/trace`);
-  }
+/** 跳转最近一次 run 详情。 */
+function goRunDetail(): void {
+  const runId = workbench.currentRun?.id;
+  if (runId) void router.push(`/projects/${projectId.value}/runs/${runId}`);
 }
 
-/** 中断当前自由对话轮（§5.4.2「中断」按钮）。 */
+/** 中断当前自由对话轮。 */
 function onAbort(): void {
   void workbench.abortChat();
 }
 
 /**
- * 提交审核结论（来自审核卡片）。
- * @param messageId 审核卡片所在消息 id
+ * 提交审核结论。
+ * @param messageId 审核卡片消息 id
  * @param payload resume 请求体
  */
 async function onReviewSubmit(messageId: string, payload: ResumePayload): Promise<void> {
@@ -287,7 +306,12 @@ function goBack(): void {
   void router.push("/projects");
 }
 
-/** 最佳努力加载能力列表（用于展示能力中文名，失败仅回退能力 id）。 */
+/** 打开分镜编辑器。 */
+function openStoryboard(): void {
+  void router.push(`/projects/${projectId.value}/storyboard`);
+}
+
+/** 最佳努力加载能力列表。 */
 async function loadCapabilities(): Promise<void> {
   if (capabilities.loaded) return;
   try {
@@ -295,6 +319,15 @@ async function loadCapabilities(): Promise<void> {
   } catch (error) {
     console.warn("[web] 能力列表加载失败，工作台回退展示能力 id", error);
   }
+}
+
+/**
+ * 窄屏顶部导航栏（对话 + 4 个右侧 Tab）。
+ * @param key 导航项
+ */
+function onNarrowTab(key: string): void {
+  narrowTab.value = key;
+  if (key !== "chat") activeTab.value = key;
 }
 
 onMounted(async () => {
@@ -317,23 +350,35 @@ onUnmounted(() => {
   workbench.dispose();
 });
 
-// 项目 id 变化（路由复用同一组件）时重新装载
+// 项目切换（路由复用同一组件）时重新装载
 watch(projectId, () => {
-  activeTab.value = "copy";
+  activeTab.value = "stage";
+  narrowTab.value = "chat";
   selectedAssetIds.value = [];
   void load();
   void assets.load(projectId.value).catch(() => undefined);
 });
 
-// run 成功完成时把产物面板切到「成片」Tab（§7.2 run_end）
+// 产物/资产变化时刷新项目资产列表（tool_end / asset.bound）
 watch(
-  () => workbench.finalReady,
-  (ready) => {
-    if (ready) activeTab.value = "final";
+  () => workbench.state.artifactRefreshToken,
+  () => {
+    void assets.load(projectId.value).catch(() => undefined);
   },
 );
 
-// 对话流内容变化时若用户停留在底部则锚定到底
+// run 成功完成时切到「产物」Tab
+watch(
+  () => workbench.finalReady,
+  (ready) => {
+    if (ready) {
+      activeTab.value = "artifacts";
+      if (isNarrow.value) narrowTab.value = "artifacts";
+    }
+  },
+);
+
+// 对话流变化时锚定到底部
 watch(streamTick, async () => {
   await nextTick();
   if (stickToBottom) scrollToBottom();
@@ -342,7 +387,7 @@ watch(streamTick, async () => {
 
 <template>
   <div class="workbench">
-    <!-- 页头区（§5.4.1） -->
+    <!-- 页头 -->
     <header class="wb-header">
       <button type="button" class="wb-back" aria-label="返回项目列表" @click="goBack">
         <arrow-left-outlined aria-hidden="true" />
@@ -351,102 +396,94 @@ watch(streamTick, async () => {
       <h1 class="wb-title" :title="workbench.project?.name">
         {{ workbench.project?.name ?? "工作台" }}
       </h1>
-      <a-tag v-if="capabilityName" color="blue">{{ capabilityName }}</a-tag>
-      <state-tag v-if="workbench.project" type="project" :status="workbench.project.status" />
-      <state-tag
-        v-if="workbench.currentRun"
-        type="run"
-        :status="workbench.currentRun.status"
-        :error-code="workbench.currentRun.error_code"
-      />
+      <VfPill v-if="capabilityName" tone="info">{{ capabilityName }}</VfPill>
+      <VfPill v-if="projectStatus" :tone="statusTone(projectStatus.color)">
+        {{ projectStatus.text }}
+      </VfPill>
+      <VfPill v-if="runStatus" :tone="statusTone(runStatus.color)">{{ runStatus.text }}</VfPill>
 
       <div class="wb-actions">
-        <a-tooltip :title="workbench.runActive ? '已有任务在运行' : ''">
-          <a-button
-            type="primary"
-            :disabled="workbench.runActive || workbench.actionPending"
-            :loading="workbench.actionPending && !workbench.runActive"
-            @click="onStartRun"
-          >
-            发起 run
-          </a-button>
-        </a-tooltip>
-        <a-popconfirm
-          v-if="workbench.runActive"
-          title="确定取消当前运行？"
-          ok-text="取消运行"
-          cancel-text="继续等待"
-          @confirm="onCancelRun"
+        <VfButton
+          :disabled="workbench.runActive || workbench.actionPending"
+          @click="onStartRun"
         >
-          <a-button danger :disabled="workbench.actionPending">取消 run</a-button>
-        </a-popconfirm>
-        <a-button :disabled="!traceEnabled" @click="goTrace">查看 Trace</a-button>
+          {{ workbench.actionPending && !workbench.runActive ? "发起中…" : "发起 Run" }}
+        </VfButton>
+        <VfButton v-if="workbench.runActive" variant="danger" @click="onCancelRun">
+          取消 Run
+        </VfButton>
+        <VfButton variant="ghost" :disabled="!workbench.currentRun" @click="goRunDetail">
+          查看 Run
+        </VfButton>
       </div>
     </header>
 
-    <!-- 越权 / 加载失败（§8） -->
-    <a-result v-if="forbidden" status="403" title="没有权限查看该内容" />
-    <a-result
-      v-else-if="workbench.loadError"
-      status="warning"
-      title="工作台加载失败"
-      sub-title="请检查服务是否在线后重试"
-    >
-      <template #extra>
-        <a-button type="primary" @click="load">重试</a-button>
-      </template>
-    </a-result>
-
-    <a-skeleton v-else-if="workbench.loading && !workbench.project" active />
+    <!-- 越权 / 加载失败 -->
+    <section v-if="forbidden" class="wb-state">
+      <h2 class="wb-state__title">没有权限查看该内容</h2>
+    </section>
+    <section v-else-if="workbench.loadError" class="wb-state">
+      <h2 class="wb-state__title">工作台加载失败</h2>
+      <p class="wb-state__desc">请检查服务是否在线后重试。</p>
+      <VfButton @click="load">重试</VfButton>
+    </section>
+    <p v-else-if="workbench.loading && !workbench.project" class="wb-state__desc">正在加载工作台…</p>
 
     <template v-else>
-      <!-- 窄屏顶部 Tab 导航 -->
-      <a-tabs v-if="isNarrow" v-model:activeKey="narrowTab" class="wb-narrow-nav">
-        <a-tab-pane key="chat" tab="对话" />
-        <a-tab-pane key="progress" tab="进度" />
-        <a-tab-pane key="artifact" tab="资产" />
-      </a-tabs>
+      <!-- 窄屏导航 -->
+      <nav v-if="isNarrow" class="wb-narrow-nav" aria-label="工作台分区">
+        <button
+          v-for="item in [
+            { key: 'chat', label: '对话' },
+            { key: 'stage', label: '阶段' },
+            { key: 'storyboard', label: '分镜' },
+            { key: 'assets', label: '资产' },
+            { key: 'artifacts', label: '产物' },
+          ]"
+          :key="item.key"
+          type="button"
+          class="wb-narrow-tab"
+          :class="{ 'is-active': narrowTab === item.key }"
+          :aria-pressed="narrowTab === item.key"
+          @click="onNarrowTab(item.key)"
+        >
+          {{ item.label }}
+        </button>
+      </nav>
 
       <div class="wb-body" :class="{ 'is-narrow': isNarrow }">
-        <!-- 对话流（左栏，§5.4.2） -->
-        <section v-show="!isNarrow || narrowTab === 'chat'" class="wb-chat" aria-label="对话流">
-          <a-alert
-            v-if="workbench.connection === 'disconnected'"
-            type="error"
-            show-icon
-            banner
-            message="实时连接已断开，正在重试…"
-            class="wb-conn-alert"
-          />
+        <!-- 对话流 -->
+        <section
+          v-show="!isNarrow || narrowTab === 'chat'"
+          class="wb-chat"
+          aria-label="对话流"
+        >
+          <p v-if="workbench.connection === 'disconnected'" class="wb-conn" role="alert">
+            实时连接已断开，正在重试…
+          </p>
 
           <div ref="listRef" class="wb-messages" aria-live="polite" @scroll="onListScroll">
             <div v-if="workbench.hasMoreHistory" class="wb-load-earlier">
-              <a-button
-                type="link"
-                size="small"
-                :loading="workbench.loadingEarlier"
-                @click="onLoadEarlier"
-              >
-                加载更早的消息
-              </a-button>
+              <VfButton variant="ghost" @click="onLoadEarlier">
+                {{ workbench.loadingEarlier ? "加载中…" : "加载更早的消息" }}
+              </VfButton>
             </div>
-            <a-empty
-              v-if="workbench.messages.length === 0"
-              description="暂无对话，任务进度与工具调用将实时显示在这里"
-            />
+            <p v-if="workbench.messages.length === 0" class="wb-muted">
+              暂无对话，任务进度与工具调用将实时显示在这里。
+            </p>
             <div
               v-for="item in chatItems"
               :key="item.key"
               :data-stage="itemStage(item)"
               class="wb-message"
             >
-              <tool-group
+              <ToolGroup
                 v-if="item.kind === 'toolGroup'"
                 :items="item.items"
                 :project="workbench.project"
                 :run-id="workbench.currentRun?.id"
               />
-              <message-bubble
+              <MessageBubble
                 v-else
                 :message="item.message"
                 :project="workbench.project"
@@ -459,38 +496,36 @@ watch(streamTick, async () => {
 
           <div class="wb-input">
             <div v-if="selectedAssets.length" class="wb-asset-chips" aria-label="已引用资产">
-              <a-tag
-                v-for="asset in selectedAssets"
-                :key="asset.id"
-                closable
-                @close.prevent="removeAssetReference(asset.id)"
-              >
+              <span v-for="asset in selectedAssets" :key="asset.id" class="wb-chip">
                 {{ asset.kind }} · {{ asset.label }}
-              </a-tag>
+                <button
+                  type="button"
+                  class="wb-chip__remove"
+                  :aria-label="`移除引用 ${asset.label}`"
+                  @click="removeAssetReference(asset.id)"
+                >
+                  ×
+                </button>
+              </span>
             </div>
-            <a-textarea
-              v-model:value="draft"
-              :auto-size="{ minRows: 1, maxRows: 5 }"
+
+            <textarea
+              v-model="draft"
+              class="wb-textarea"
+              rows="2"
               :placeholder="inputPlaceholder"
-              :disabled="workbench.sending || !workbench.session"
               aria-label="对话输入框"
-              @press-enter="onPressEnter"
+              :disabled="workbench.sending || !workbench.session"
+              @keydown.enter="onPressEnter"
             />
+
             <div class="wb-input-actions">
-              <a-select
-                class="wb-asset-select"
-                show-search
-                :value="undefined"
-                placeholder="@ 引用项目资产"
-                :options="
-                  assets.filteredItems.map((asset) => ({
-                    value: asset.id,
-                    label: `${asset.kind} · ${asset.label}`,
-                  }))
-                "
-                aria-label="引用项目资产"
-                @select="addAssetReference"
-              />
+              <select class="wb-asset-select" aria-label="引用项目资产" @change="onSelectAsset">
+                <option value="">@ 引用项目资产</option>
+                <option v-for="asset in assetOptions" :key="asset.id" :value="asset.id">
+                  {{ asset.kind }} · {{ asset.label }}
+                </option>
+              </select>
               <input
                 ref="uploadInputRef"
                 class="wb-upload-input"
@@ -498,73 +533,43 @@ watch(streamTick, async () => {
                 accept=".txt,.md,.pdf,.png,.jpg,.jpeg,.webp,.mp3,.wav,.m4a,.ogg"
                 @change="onUpload"
               />
-              <a-button :loading="assets.uploading" aria-label="上传项目素材" @click="chooseUpload">
-                <template #icon><paper-clip-outlined /></template>
-                上传
-              </a-button>
-              <a-button v-if="workbench.agentStreaming" danger @click="onAbort">中断</a-button>
-              <a-button
-                type="primary"
-                :disabled="sendDisabled"
-                :loading="workbench.sending"
-                @click="send"
-              >
-                <template #icon><send-outlined /></template>
-                发送
-              </a-button>
+              <VfButton variant="ghost" @click="chooseUpload">
+                <paper-clip-outlined aria-hidden="true" />
+                {{ assets.uploading ? "上传中…" : "上传" }}
+              </VfButton>
+              <VfButton v-if="workbench.agentStreaming" variant="danger" @click="onAbort">
+                中断
+              </VfButton>
+              <VfButton :disabled="sendDisabled" @click="send">
+                <send-outlined aria-hidden="true" />
+                {{ workbench.sending ? "发送中…" : "发送" }}
+              </VfButton>
             </div>
           </div>
         </section>
 
-        <!-- 右栏：阶段进度 + 产物面板 -->
-        <aside class="wb-side">
-          <section v-show="!isNarrow || narrowTab === 'progress'" class="wb-panel wb-stages">
-            <h2 class="wb-panel-title">阶段进度</h2>
-            <stage-steps
-              :stages="workbench.stages"
-              :review-stage="reviewStage"
-              @select="scrollToStage"
-            />
-          </section>
-
-          <section v-show="!isNarrow || narrowTab === 'artifact'" class="wb-panel wb-artifacts">
-            <div class="wb-assets-heading">
-              <h2 class="wb-panel-title">项目资产</h2>
-              <a-input
-                v-model:value="assets.query"
-                size="small"
-                placeholder="搜索素材"
-                aria-label="搜索项目资产"
-              />
-            </div>
-            <div class="wb-asset-list">
-              <a-empty
-                v-if="!assets.filteredItems.length"
-                :image="false"
-                description="暂无可引用资产"
-              />
-              <button
-                v-for="asset in assets.filteredItems"
-                :key="asset.id"
-                type="button"
-                class="wb-asset-item"
-                @click="addAssetReference(asset.id)"
-              >
-                <span>{{ asset.kind }}</span>
-                <strong>{{ asset.label }}</strong>
-                <small>{{ asset.source === "uploaded" ? "已上传" : "流水线生成" }}</small>
-              </button>
-            </div>
-            <a-divider />
-            <h3 class="wb-panel-title">流水线产物</h3>
-            <artifact-tabs
-              v-model:active-tab="activeTab"
-              :artifacts="workbench.artifacts"
-              :project="workbench.project"
-              :final-ready="workbench.finalReady"
-              @regenerate="prefillRegeneration"
-            />
-          </section>
+        <!-- 右栏 4 Tab -->
+        <aside
+          v-show="!isNarrow || narrowTab !== 'chat'"
+          class="wb-side"
+          aria-label="项目分区"
+        >
+          <WorkbenchTabs
+            v-model:active-tab="activeTab"
+            :project="workbench.project"
+            :run="workbench.currentRun"
+            :stages="workbench.stages"
+            :artifacts="workbench.artifacts"
+            :assets="assets.items"
+            :review-stage="reviewStage"
+            :final-ready="workbench.finalReady"
+            :storyboard-refresh-token="workbench.state.storyboardRefreshToken"
+            :quality-refresh-token="workbench.state.qualityRefreshToken"
+            @reference-asset="addAssetReference"
+            @select-stage="scrollToStage"
+            @open-storyboard="openStoryboard"
+            @regenerate="prefillRegeneration"
+          />
         </aside>
       </div>
     </template>
@@ -576,38 +581,49 @@ watch(streamTick, async () => {
   display: flex;
   width: 100%;
   flex-direction: column;
-  /* 高度 = 视口 - 顶栏 - 内容区上下内边距（16px × 2），保证输入框始终可见 */
-  height: calc(100vh - var(--vf-header-height) - 32px);
-  min-height: 420px;
-  margin: 0 auto;
-  gap: 10px;
+  gap: var(--space-3);
 }
 
 .wb-header {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--border-soft);
 }
 
 .wb-back {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 4px 8px;
-  border: 1px solid var(--vf-border-strong);
-  border-radius: var(--vf-radius-sm);
-  background: var(--vf-surface);
-  color: var(--vf-text-secondary);
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--text-sec);
+  font-family: inherit;
+  font-size: var(--font-size-small);
   cursor: pointer;
+}
+
+.wb-back:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.wb-back:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .wb-title {
   max-width: 320px;
   margin: 0;
   overflow: hidden;
-  font-size: 16px;
-  font-weight: 700;
+  font-size: var(--font-size-card-title);
+  font-weight: var(--font-weight-strong);
+  color: var(--text);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -615,43 +631,98 @@ watch(streamTick, async () => {
 .wb-actions {
   display: flex;
   margin-inline-start: auto;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
-.wb-narrow-nav :deep(.ant-tabs-content-holder) {
-  display: none;
+.wb-state {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-6);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+}
+
+.wb-state__title {
+  margin: 0;
+  font-size: var(--font-size-card-title);
+  color: var(--text);
+}
+
+.wb-state__desc {
+  margin: 0;
+  font-size: var(--font-size-small);
+  color: var(--text-ter);
+}
+
+.wb-narrow-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.wb-narrow-tab {
+  min-height: 32px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--text-sec);
+  font-family: inherit;
+  font-size: var(--font-size-small);
+  cursor: pointer;
+}
+
+.wb-narrow-tab.is-active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: var(--font-weight-strong);
+}
+
+.wb-narrow-tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .wb-body {
   display: grid;
-  flex: 1;
-  min-height: 0;
-  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
-  gap: 10px;
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+  gap: var(--space-3);
+  height: calc(100vh - var(--shell-header-height) - var(--shell-content-padding) * 2 - 60px);
+  min-height: 520px;
 }
 
 .wb-body.is-narrow {
   grid-template-columns: minmax(0, 1fr);
+  height: auto;
+  min-height: 0;
 }
 
 .wb-chat {
   display: flex;
   min-height: 0;
   flex-direction: column;
-  gap: 8px;
-  padding: 10px;
-  border: 1px solid var(--vf-border);
-  border-radius: var(--vf-radius);
-  background: var(--vf-surface);
+  gap: var(--space-2);
+  padding: var(--space-3);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
 }
 
-.wb-conn-alert {
-  flex: none;
+.wb-conn {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  background: var(--danger-soft);
+  border-radius: var(--radius-control);
+  color: var(--danger);
+  font-size: var(--font-size-small);
 }
 
 .wb-load-earlier {
   display: flex;
-  flex: none;
   justify-content: center;
 }
 
@@ -660,120 +731,126 @@ watch(streamTick, async () => {
   flex: 1;
   min-height: 0;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
   overflow-y: auto;
-  padding: 4px 2px;
+  padding: var(--space-1);
+}
+
+.wb-message {
+  display: flex;
+  flex-direction: column;
 }
 
 .wb-input {
   display: flex;
   flex: none;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border-soft);
+}
+
+.wb-textarea {
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--font-size-body);
+  line-height: var(--line-height-body);
+  resize: vertical;
+}
+
+.wb-textarea:focus {
+  outline: none;
+  border-color: var(--accent);
 }
 
 .wb-input-actions {
   display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-.wb-asset-chips {
-  display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
 }
 
 .wb-asset-select {
-  width: 180px;
+  max-width: 190px;
+  height: 36px;
+  padding: 0 var(--space-2);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  color: var(--text-sec);
+  font-family: inherit;
+  font-size: var(--font-size-small);
+}
+
+.wb-asset-select:focus {
+  outline: none;
+  border-color: var(--accent);
 }
 
 .wb-upload-input {
   display: none;
 }
 
-.wb-assets-heading {
+.wb-asset-chips {
   display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.wb-chip {
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-1);
+  padding: 2px var(--space-2);
+  background: var(--accent-soft);
+  border-radius: var(--radius-pill);
+  color: var(--accent);
+  font-size: var(--font-size-caption);
 }
 
-.wb-assets-heading .wb-panel-title {
-  flex: none;
-}
-
-.wb-asset-list {
-  display: grid;
-  max-height: 160px;
-  gap: 4px;
-  overflow: auto;
-}
-
-.wb-asset-item {
-  display: grid;
-  grid-template-columns: 48px minmax(0, 1fr) auto;
-  gap: 6px;
-  padding: 6px;
-  border: 1px solid var(--vf-border);
-  border-radius: var(--vf-radius-sm);
-  background: var(--vf-surface);
-  color: var(--vf-text);
+.wb-chip__remove {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: var(--font-size-small);
+  line-height: 1;
   cursor: pointer;
-  text-align: left;
 }
 
-.wb-asset-item:hover {
-  border-color: var(--vf-primary);
-}
-
-.wb-asset-item strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.wb-asset-item small {
-  color: var(--vf-text-tertiary);
+.wb-chip__remove:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .wb-side {
-  display: grid;
+  display: flex;
   min-height: 0;
-  grid-template-rows: minmax(0, auto) minmax(0, 1fr);
-  gap: 10px;
+  flex-direction: column;
 }
 
-.wb-body.is-narrow .wb-side {
-  grid-template-rows: auto;
-}
-
-.wb-panel {
-  min-height: 0;
-  padding: 10px;
-  overflow: auto;
-  border: 1px solid var(--vf-border);
-  border-radius: var(--vf-radius);
-  background: var(--vf-surface);
-}
-
-.wb-panel-title {
-  margin: 0 0 8px;
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.wb-stages {
-  max-height: 46vh;
+.wb-muted {
+  margin: 0;
+  font-size: var(--font-size-small);
+  color: var(--text-ter);
 }
 
 @media (max-width: 899.98px) {
-  .workbench {
+  .wb-body {
+    grid-template-columns: minmax(0, 1fr);
     height: auto;
     min-height: 0;
   }
 
-  .wb-stages {
-    max-height: none;
+  .wb-chat {
+    min-height: 320px;
   }
 }
 

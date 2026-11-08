@@ -41,6 +41,10 @@ export interface Project {
   style: string | null;
   /** 输出 Profile 名（默认 `landscape-1080p`，见设计文档 §6.1）。 */
   profile: string;
+  /** 项目主题 ID（创建时快照；旧项目为空）。 */
+  theme_id: string | null;
+  /** 契约版本：`1.0` 七阶段旧链路，`2.0` shots/cue 链路。 */
+  contract_version: string;
   status: ProjectStatus;
   created_at: string;
   updated_at: string;
@@ -91,12 +95,26 @@ export const PROJECT_ASSET_KINDS = [
 /** 项目资产类型。 */
 export type ProjectAssetKind = (typeof PROJECT_ASSET_KINDS)[number];
 
+/** 素材库展示分类（与资产 kind 正交，见重构方案 §8.5 素材库）。 */
+export const PROJECT_VISUAL_CATEGORIES = [
+  "ai-generated",
+  "live-action",
+  "archive-photo",
+  "3d-render",
+  "video-clip",
+  "style-anchor",
+] as const;
+/** 素材库展示分类。 */
+export type ProjectVisualCategory = (typeof PROJECT_VISUAL_CATEGORIES)[number];
+
 /** 项目资产（用户上传或流水线生成）。 */
 export interface ProjectAsset {
   id: string;
   project_id: string;
   source: ProjectAssetSource;
   kind: ProjectAssetKind;
+  /** 素材库展示分类；旧数据为空，由同步逻辑按来源推断。 */
+  visual_category: ProjectVisualCategory | null;
   label: string;
   relative_path: string;
   mime_type: string;
@@ -171,12 +189,17 @@ export const RUN_TRIGGERS = ["user", "retry", "resume"] as const;
 /** 运行触发方式，见设计文档 §11。 */
 export type RunTrigger = (typeof RUN_TRIGGERS)[number];
 
-/** 流水线阶段集合（有序，即为阶段顺序），见设计文档 §6.1、§11。 */
+/**
+ * 流水线阶段集合（有序，即为阶段顺序），见设计文档 §6.1、§11、重构方案 §4.4。
+ * v2 八阶段：`captions`（独立字幕轨）位于 `tts` 之后、`storyboard` 之前，
+ * 因为字幕只依赖 cue，而时间轴需要合并 cue 与镜头切点。
+ */
 export const PIPELINE_STAGES = [
   "copy",
   "image",
   "scene",
   "tts",
+  "captions",
   "storyboard",
   "render",
   "compose",
@@ -200,9 +223,24 @@ export interface Run {
   current_stage: PipelineStage | null;
   /** 失败时写入的错误码；进程重启中断时取 `RUN_ERROR_INTERRUPTED`。 */
   error_code: string | null;
+  /** 镜头级重生成范围；整片 run 为空。 */
+  scope_json: RunScope | null;
+  /** 创建 run 时的契约版本快照。 */
+  contract_version: string;
   created_at: string;
   started_at: string | null;
   ended_at: string | null;
+}
+
+/**
+ * run 的执行范围：用于镜头级重生成。
+ * 为空表示整片 run；`shotIds` 只允许命中当前项目 copy v2 中的镜头。
+ */
+export interface RunScope {
+  /** 目标镜头 ID 列表；为空表示全部镜头。 */
+  shotIds?: string[];
+  /** 从哪个阶段开始重跑；缺省按受影响阶段推断。 */
+  fromStage?: PipelineStage;
 }
 
 /** 阶段实例状态集合，见设计文档 §11 `run_stages.status` 与 §6.2 状态机。 */
@@ -272,4 +310,19 @@ export interface LlmCall {
 export interface Actor {
   userId: string;
   role: UserRole;
+}
+
+/** 登录事件（追加式），供管理页登录日志展示；不记录密码。 */
+export interface LoginEvent {
+  id: string;
+  /** 命中的用户 ID；用户不存在或密码错误时为空。 */
+  user_id: string | null;
+  /** 登录时输入的用户名。 */
+  username: string;
+  ok: boolean;
+  /** 失败原因短码；成功时为空。 */
+  reason: string | null;
+  ip: string | null;
+  user_agent: string | null;
+  created_at: string;
 }

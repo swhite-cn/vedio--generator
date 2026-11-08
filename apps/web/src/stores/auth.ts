@@ -51,15 +51,20 @@ export const useAuthStore = defineStore("auth", () => {
    * 登录：调用登录接口并落 token 与用户信息。
    * @param username 用户名
    * @param password 密码
+   * @param remember 是否记住登录（true 持久到 localStorage，false 仅本次会话）
    * @returns 登录后的当前用户
    */
-  async function login(username: string, password: string): Promise<AuthUser> {
+  async function login(
+    username: string,
+    password: string,
+    remember = true,
+  ): Promise<AuthUser> {
     const result = await apiRequest<{ token: string; user: ApiPublicUser }>("/api/auth/login", {
       method: "POST",
       body: { username, password },
       auth: false,
     });
-    setToken(result.token);
+    setToken(result.token, remember);
     token.value = result.token;
     me.value = toAuthUser(result.user);
     console.info("[web-store] 登录成功");

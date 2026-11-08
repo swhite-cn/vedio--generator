@@ -1,6 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, inArray } from "drizzle-orm";
-import type { Actor, PipelineStage, Run, RunStatus, RunTrigger } from "@videoforge/shared";
+import type {
+  Actor,
+  PipelineStage,
+  Run,
+  RunScope,
+  RunStatus,
+  RunTrigger,
+} from "@videoforge/shared";
 import { RUN_ERROR_INTERRUPTED, VideoForgeError } from "@videoforge/shared";
 import { projects, runs } from "../schema.js";
 import { getProject } from "./project-repository.js";
@@ -15,6 +22,21 @@ function assertAdmin(actor: Actor): void {
   }
 }
 
+/**
+ * 解析 run 的镜头级范围 JSON；损坏时按整片 run 处理并记录告警。
+ * @param raw scope_json 原始文本
+ * @returns 解析后的范围或 null
+ */
+function parseRunScope(raw: string | null | undefined): RunScope | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as RunScope;
+  } catch {
+    console.warn("[run-repository] scope_json 解析失败，按整片 run 处理");
+    return null;
+  }
+}
+
 /** 将数据库行映射为领域 `Run`（snake_case，见设计文档 §11）。 */
 function toRun(row: any): Run {
   return {
@@ -25,6 +47,8 @@ function toRun(row: any): Run {
     trigger: row.trigger as RunTrigger,
     current_stage: (row.currentStage ?? null) as PipelineStage | null,
     error_code: row.errorCode ?? null,
+    scope_json: parseRunScope(row.scopeJson),
+    contract_version: row.contractVersion ?? "1.0",
     created_at: row.createdAt,
     started_at: row.startedAt ?? null,
     ended_at: row.endedAt ?? null,
@@ -42,6 +66,10 @@ export interface CreateRunInput {
   sessionId: string;
   trigger: RunTrigger;
   status?: RunStatus;
+  /** 镜头级重生成范围；整片 run 省略。 */
+  scope?: RunScope | null;
+  /** 契约版本快照；默认继承 `1.0`，v2 入口传 `2.0`。 */
+  contractVersion?: string;
 }
 
 /**
@@ -64,6 +92,8 @@ export function createRun(db: any, actor: Actor, input: CreateRunInput): Run {
     trigger: input.trigger,
     currentStage: null,
     errorCode: null,
+    scopeJson: input.scope ? JSON.stringify(input.scope) : null,
+    contractVersion: input.contractVersion ?? "1.0",
     createdAt: new Date().toISOString(),
     startedAt: null,
     endedAt: null,

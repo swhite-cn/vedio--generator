@@ -1,0 +1,63 @@
+{
+  "contractVersion": "2.0",
+  "topic": "水银如何变成黄金",
+  "style": "硬核科普、冷峻、数据驱动",
+  "title": "把水银原子核里的质子敲掉一个",
+  "theme": { "id": "documentary-dark" },
+  "styleAnchors": [
+    {
+      "key": "mercury",
+      "label": "水银",
+      "color": "#C9CED6",
+      "assetId": "ast-anchor-mercury"
+    },
+    {
+      "key": "gold",
+      "label": "黄金",
+      "color": "#E2B53E",
+      "assetId": "ast-anchor-gold"
+    }
+  ],
+  "scenes": [
+    {
+      "sceneId": "s1",
+      "chapterNo": 1,
+      "title": "开场钩子",
+      "shots": [
+        {
+          "shotId": "sh-001",
+          "narration": "把水银原子核里的质子敲掉一个，它就变成了黄金。",
+          "onScreenText": "水银 → 黄金",
+          "emphasis": ["水银", "黄金"],
+          "visualType": "component",
+          "component": {
+            "id": "keyword-block",
+            "params": {
+              "title": "水银 → 黄金",
+              "subtitle": "原子核里只少一个质子",
+              "underline": "sweep"
+            }
+          },
+          "assetRefs": [{ "assetId": "ast-anchor-mercury", "role": "symbol" }],
+          "transitionIn": "hard-cut",
+          "transitionOut": "hard-cut",
+          "sourceRef": { "label": "CERN 公开资料", "url": "https://home.cern/" }
+        },
+        {
+          "shotId": "sh-002",
+          "narration": "这不是炼金术，是核物理。",
+          "onScreenText": "不是炼金术，是核物理",
+          "emphasis": ["核物理"],
+          "visualType": "image",
+          "assetRefs": [
+            { "assetId": "ast-lab-hq", "role": "background" },
+            { "assetId": "ast-anchor-mercury", "role": "symbol" }
+          ],
+          "transitionIn": "fade-120",
+          "transitionOut": "hard-cut",
+          "sourceRef": null
+        }
+      ]
+    }
+  ]
+}

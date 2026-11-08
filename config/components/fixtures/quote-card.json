@@ -1,0 +1,9 @@
+{
+  "componentId": "quote-card",
+  "props": {
+    "quote": "知识不是记忆，而是能被随时调用的结构。",
+    "author": "示例嘉宾",
+    "role": "认知科学研究者",
+    "emphasis": "结构"
+  }
+}

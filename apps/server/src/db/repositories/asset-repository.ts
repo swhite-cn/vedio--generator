@@ -6,6 +6,7 @@ import type {
   ProjectAsset,
   ProjectAssetKind,
   ProjectAssetSource,
+  ProjectVisualCategory,
 } from "@videoforge/shared";
 import { VideoForgeError } from "@videoforge/shared";
 import { messageAssetRefs, messages, projectAssets, projects, sessions } from "../schema.js";
@@ -18,6 +19,7 @@ function toProjectAsset(row: any): ProjectAsset {
     project_id: row.projectId,
     source: row.source as ProjectAssetSource,
     kind: row.kind as ProjectAssetKind,
+    visual_category: (row.visualCategory ?? null) as ProjectVisualCategory | null,
     label: row.label,
     relative_path: row.relativePath,
     mime_type: row.mimeType,
@@ -46,6 +48,8 @@ export interface CreateProjectAssetInput {
   projectId: string;
   source: ProjectAssetSource;
   kind: ProjectAssetKind;
+  /** 素材库展示分类；缺省为空，由同步/上传流程按来源推断。 */
+  visualCategory?: ProjectVisualCategory | null;
   label: string;
   relativePath: string;
   mimeType: string;
@@ -59,6 +63,8 @@ export interface CreateProjectAssetInput {
 export interface ProjectAssetQuery {
   kind?: ProjectAssetKind;
   source?: ProjectAssetSource;
+  /** 素材库分类筛选（T118 接入 UI）。 */
+  visualCategory?: ProjectVisualCategory;
 }
 
 /**
@@ -81,6 +87,7 @@ export function createProjectAsset(
     projectId: input.projectId,
     source: input.source,
     kind: input.kind,
+    visualCategory: input.visualCategory ?? null,
     label: input.label,
     relativePath: input.relativePath,
     mimeType: input.mimeType,
@@ -113,6 +120,9 @@ export function listProjectAssets(
   const conditions = [eq(projectAssets.projectId, projectId)];
   if (query.kind) conditions.push(eq(projectAssets.kind, query.kind));
   if (query.source) conditions.push(eq(projectAssets.source, query.source));
+  if (query.visualCategory) {
+    conditions.push(eq(projectAssets.visualCategory, query.visualCategory));
+  }
   return db
     .select()
     .from(projectAssets)
@@ -137,6 +147,35 @@ export function getProjectAsset(db: any, actor: Actor, assetId: string): Project
     .where(and(eq(projectAssets.id, assetId), eq(projects.userId, actor.userId)))
     .get();
   return row ? toProjectAsset(row.asset) : undefined;
+}
+
+/**
+ * 合并更新项目资产的 `metadata_json`（T401 风格锚绑定留痕）。
+ * 保留已有键，仅覆盖 patch 中出现的键；patch 传入 `null` 表示清空该键。
+ * @param db Drizzle 数据库实例
+ * @param actor 当前请求主体
+ * @param assetId 资产 ID
+ * @param patch 待合并的元数据
+ * @returns 更新后的资产；资产不存在或无权访问时返回 undefined
+ */
+export function updateProjectAssetMetadata(
+  db: any,
+  actor: Actor,
+  assetId: string,
+  patch: Record<string, unknown>,
+): ProjectAsset | undefined {
+  const asset = getProjectAsset(db, actor, assetId);
+  if (!asset) return undefined;
+  const existing =
+    asset.metadata_json && typeof asset.metadata_json === "object" && !Array.isArray(asset.metadata_json)
+      ? (asset.metadata_json as Record<string, unknown>)
+      : {};
+  const metadataJson = JSON.stringify({ ...existing, ...patch });
+  db.update(projectAssets)
+    .set({ metadataJson })
+    .where(eq(projectAssets.id, assetId))
+    .run();
+  return getProjectAsset(db, actor, assetId);
 }
 
 /**

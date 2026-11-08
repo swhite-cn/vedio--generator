@@ -57,6 +57,8 @@ export async function arkGenerateImage(options: {
   model: string;
   prompt: string;
   size: string;
+  /** 可选固定 seed；同一符号跨镜头复用时保持一致。 */
+  seed?: number;
 }): Promise<Buffer> {
   const response = await fetch(`${options.baseUrl}/images/generations`, {
     method: "POST",
@@ -69,6 +71,7 @@ export async function arkGenerateImage(options: {
       prompt: options.prompt,
       size: options.size,
       response_format: "b64_json",
+      ...(options.seed !== undefined ? { seed: options.seed } : {}),
     }),
   });
   await ensureOk(response, "images/generations");

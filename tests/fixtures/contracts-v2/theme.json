@@ -1,0 +1,28 @@
+{
+  "id": "documentary-dark",
+  "name": "硬核科普深色",
+  "frame": {
+    "width": 1920,
+    "height": 1080,
+    "safe_area": 0.9
+  },
+  "tokens": {
+    "text": "#E5E0D5",
+    "background": "#111310",
+    "accent": "#F1E21D",
+    "secondary": ["#B33630", "#3BD5B0", "#4904F5"],
+    "font_family": "PingFang SC, Microsoft YaHei, system-ui",
+    "title_size": 96,
+    "body_size": 40,
+    "caption": {
+      "size": 44,
+      "stroke": 4,
+      "bottom_ratio": 0.06,
+      "max_chars_per_line": 18
+    }
+  },
+  "motion": {
+    "min_duration_ms": 300,
+    "max_duration_ms": 800
+  }
+}

@@ -1,25 +1,5 @@
 import type { OutputProfile } from "@videoforge/shared";
 
-/** 最小场景输入契约。 */
-export interface SceneData {
-  sceneId: string;
-  title: string;
-  narration: string;
-  /** 可选：场景图片的绝对路径；存在时模板将其渲染为全屏底图 */
-  imagePath?: string;
-  /** 可选：LLM 动画场景 HTML 的绝对路径（scene:gen 产物）；存在时渲染器走 GSAP 寻帧 */
-  htmlPath?: string;
-  /** 可选：底图的 data: URL（由渲染器从 imagePath 读入，避免 about:blank 拦截 file:// 子资源） */
-  imageDataUrl?: string;
-}
-
-/** 模板渲染上下文。 */
-export interface SceneContext {
-  scene: SceneData;
-  profile: OutputProfile;
-  timeMs: number;
-}
-
 /** 输出 Profile 尺寸和安全区。 */
 export interface ProfileSpec {
   profile: OutputProfile;

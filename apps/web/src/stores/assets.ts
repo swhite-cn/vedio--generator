@@ -8,16 +8,24 @@ export interface ProjectAsset {
   project_id: string;
   source: "generated" | "uploaded";
   kind: "document" | "image" | "audio" | "copy" | "scene" | "timeline" | "video" | "frames";
+  /** 素材库 6 类分类（T118；旧数据可能为 null）。 */
+  visual_category?: string | null;
   label: string;
   relative_path: string;
   mime_type: string;
   size_bytes: number;
+  /** 已绑定镜头数（T118，由 copy v2 计算）。 */
+  boundShots?: number;
+  run_id?: string | null;
+  stage?: string | null;
   created_at: string;
 }
 
 /** 项目资产加载、上传与筛选状态。 */
 export const useAssetsStore = defineStore("assets", () => {
   const items = ref<ProjectAsset[]>([]);
+  /** 服务端返回的 6 类分类枚举（T118）。 */
+  const categories = ref<string[]>([]);
   const loading = ref(false);
   const uploading = ref(false);
   const query = ref("");
@@ -36,10 +44,11 @@ export const useAssetsStore = defineStore("assets", () => {
   async function load(projectId: string): Promise<void> {
     loading.value = true;
     try {
-      const result = await apiRequest<{ items: ProjectAsset[] }>(
+      const result = await apiRequest<{ items: ProjectAsset[]; categories?: string[] }>(
         `/api/projects/${encodeURIComponent(projectId)}/assets`,
       );
       items.value = result.items;
+      categories.value = result.categories ?? [];
     } finally {
       loading.value = false;
     }
@@ -62,5 +71,5 @@ export const useAssetsStore = defineStore("assets", () => {
     }
   }
 
-  return { items, loading, uploading, query, kindFilter, filteredItems, load, upload };
+  return { items, categories, loading, uploading, query, kindFilter, filteredItems, load, upload };
 });

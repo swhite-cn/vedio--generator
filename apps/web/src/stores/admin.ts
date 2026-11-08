@@ -30,18 +30,54 @@ export interface AdminRunFilter {
   errorCode?: string;
 }
 
+/** 管理总览 4 个 KPI。 */
+export interface AdminOverview {
+  totalUsers: number;
+  totalProjects: number;
+  runsThisWeek: number;
+  successRate: number;
+  basis?: {
+    doneRuns: number;
+    failedRuns: number;
+    canceledRuns?: number;
+    completedRuns: number;
+    weekStart?: string;
+    formula?: string;
+  };
+}
+
+/** 登录日志视图（`GET /api/admin/login-events` 元素）。 */
+export interface LoginEventView {
+  id: string;
+  user_id: string | null;
+  username: string;
+  ok: boolean;
+  reason: string | null;
+  ip: string | null;
+  user_agent: string | null;
+  created_at: string;
+}
+
 export const useAdminStore = defineStore("admin", () => {
   const users = ref<AdminUser[]>([]);
   const projects = ref<Project[]>([]);
   const runs = ref<RunSummary[]>([]);
+  /** 4 个 KPI（`GET /api/admin/overview`）。 */
+  const overview = ref<AdminOverview | null>(null);
+  /** 最近登录日志。 */
+  const loginEvents = ref<LoginEventView[]>([]);
 
   const usersLoading = ref(false);
   const projectsLoading = ref(false);
   const runsLoading = ref(false);
+  const overviewLoading = ref(false);
+  const loginLoading = ref(false);
 
   const usersError = ref<unknown>(null);
   const projectsError = ref<unknown>(null);
   const runsError = ref<unknown>(null);
+  const overviewError = ref<unknown>(null);
+  const loginError = ref<unknown>(null);
 
   /** 加载全站用户列表。 */
   async function loadUsers(): Promise<void> {
@@ -100,6 +136,40 @@ export const useAdminStore = defineStore("admin", () => {
     }
   }
 
+  /** 加载管理总览 4 个 KPI。 */
+  async function loadOverview(): Promise<void> {
+    overviewLoading.value = true;
+    overviewError.value = null;
+    try {
+      overview.value = await apiRequest<AdminOverview>("/api/admin/overview");
+    } catch (caught) {
+      overviewError.value = caught;
+      throw caught;
+    } finally {
+      overviewLoading.value = false;
+    }
+  }
+
+  /**
+   * 加载最近登录日志。
+   * @param limit 最大条数（默认 100）
+   */
+  async function loadLoginEvents(limit = 100): Promise<void> {
+    loginLoading.value = true;
+    loginError.value = null;
+    try {
+      const result = await apiRequest<{ events: LoginEventView[] }>(
+        `/api/admin/login-events?limit=${limit}`,
+      );
+      loginEvents.value = result.events;
+    } catch (caught) {
+      loginError.value = caught;
+      throw caught;
+    } finally {
+      loginLoading.value = false;
+    }
+  }
+
   /**
    * 重置指定用户密码（唯一写操作；响应体不回传新口令）。
    * @param userId 目标用户 id
@@ -117,15 +187,23 @@ export const useAdminStore = defineStore("admin", () => {
     users,
     projects,
     runs,
+    overview,
+    loginEvents,
     usersLoading,
     projectsLoading,
     runsLoading,
+    overviewLoading,
+    loginLoading,
     usersError,
     projectsError,
     runsError,
+    overviewError,
+    loginError,
     loadUsers,
     loadProjects,
     loadRuns,
+    loadOverview,
+    loadLoginEvents,
     resetPassword,
   };
 });

@@ -126,6 +126,70 @@ describe("数据库 schema 重建", () => {
     expect(() => migrateDatabase(filename)).not.toThrow();
   });
 
+  test("v2 迁移补齐契约/主题/镜头范围/素材分类列", () => {
+    migrateDatabase(filename);
+    const database = createDatabase(filename);
+    try {
+      expect(listColumns(database, "projects")).toEqual(
+        expect.arrayContaining(["theme_id", "contract_version"]),
+      );
+      expect(listColumns(database, "runs")).toEqual(
+        expect.arrayContaining(["scope_json", "contract_version"]),
+      );
+      expect(listColumns(database, "project_assets")).toContain("visual_category");
+    } finally {
+      database.sqlite.close();
+    }
+  });
+
+  test("登录日志表与索引存在", () => {
+    migrateDatabase(filename);
+    const database = createDatabase(filename);
+    try {
+      expect(listTables(database)).toContain("login_events");
+      expect(listColumns(database, "login_events")).toEqual([
+        "id",
+        "user_id",
+        "username",
+        "ok",
+        "reason",
+        "ip",
+        "user_agent",
+        "created_at",
+      ]);
+      const indexes = listIndexes(database);
+      expect(indexes).toContain("idx_login_events_created");
+      expect(indexes).toContain("idx_login_events_username");
+    } finally {
+      database.sqlite.close();
+    }
+  });
+
+  test("既有数据库升级后新增列带默认契约版本", () => {
+    // 先按 v1 结构建库并写入一行
+    const legacy = createDatabase(filename);
+    legacy.sqlite.exec(
+      "CREATE TABLE projects (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, capability_id TEXT NOT NULL, name TEXT NOT NULL, topic TEXT NOT NULL, style TEXT, profile TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'draft', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)",
+    );
+    legacy.sqlite.exec(
+      "INSERT INTO projects (id, user_id, capability_id, name, topic, profile, status, created_at, updated_at) VALUES ('p-old', 'u1', 'cap', '旧项目', '主题', 'landscape-1080p', 'draft', '2026-01-01', '2026-01-01')",
+    );
+    legacy.sqlite.close();
+
+    migrateDatabase(filename);
+
+    const database = createDatabase(filename);
+    try {
+      const row = database.sqlite
+        .prepare("SELECT contract_version, theme_id FROM projects WHERE id = 'p-old'")
+        .get() as { contract_version: string; theme_id: string | null };
+      expect(row.contract_version).toBe("1.0");
+      expect(row.theme_id).toBeNull();
+    } finally {
+      database.sqlite.close();
+    }
+  });
+
   test("旧 projects（无 user_id）一次性替换：旧数据不沿用，新结构生效", () => {
     // 先造出旧 Build 领域的 projects 表并写入一行
     const legacy = createDatabase(filename);

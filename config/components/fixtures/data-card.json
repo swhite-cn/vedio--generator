@@ -1,0 +1,10 @@
+{
+  "componentId": "data-card",
+  "props": {
+    "label": "抽样命中率",
+    "value": "98.7",
+    "unit": "%",
+    "caption": "2024 年全球样本",
+    "trend": "up"
+  }
+}

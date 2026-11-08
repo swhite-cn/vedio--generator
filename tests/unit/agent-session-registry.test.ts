@@ -35,10 +35,9 @@ vi.mock("@videoforge/pipeline", async (importOriginal) => {
     generateScenes: vi.fn(),
     generateSpeech: vi.fn(),
     generateStoryboard: vi.fn(),
-    composeVideoStep: vi.fn(),
+    composeVideoStepV2: vi.fn(),
   };
 });
-vi.mock("@videoforge/renderer", () => ({ renderFrames: vi.fn() }));
 
 /**
  * 会话注册表单测（Phase 7 Step 3）。

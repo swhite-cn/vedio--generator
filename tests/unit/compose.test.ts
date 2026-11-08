@@ -121,4 +121,66 @@ describe("视频合成", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("loudnessTarget 进入滤镜链（loudnorm + aresample），cwd 透传给子进程", async () => {
+    vi.mocked(spawn).mockReturnValue(fakeProcessExit("ok", 0) as never);
+    const dir = mkdtempSync(join(tmpdir(), "vf-compose-"));
+    try {
+      const options = { ...makeOptions(dir), loudnessTarget: -14, cwd: dir };
+      await composeVideo(options);
+      const calls = vi.mocked(spawn).mock.calls[0] as unknown as [
+        string,
+        string[],
+        { cwd?: string },
+      ];
+      const filter = calls[1][calls[1].indexOf("-filter_complex") + 1]!;
+      expect(filter).toContain("loudnorm=I=-14:TP=-1.5:LRA=11");
+      expect(filter).toContain("aresample=48000");
+      expect(filter).toContain("apad");
+      expect(calls[2].cwd).toBe(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("loudnessTarget 越界时抛 CONFIG_INVALID 且不启动 ffmpeg", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "vf-compose-"));
+    try {
+      await expect(
+        composeVideo({ ...makeOptions(dir), loudnessTarget: -100 }),
+      ).rejects.toThrowError(/CONFIG_INVALID/);
+      expect(vi.mocked(spawn)).not.toHaveBeenCalled();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("assPath 时追加 -vf ass=<相对路径>（字幕烧录）", async () => {
+    vi.mocked(spawn).mockReturnValue(fakeProcessExit("ok", 0) as never);
+    const dir = mkdtempSync(join(tmpdir(), "vf-compose-"));
+    try {
+      await composeVideo({ ...makeOptions(dir), assPath: "captions/subtitle.ass" });
+      const args = (vi.mocked(spawn).mock.calls[0] as unknown as [string, string[]])[1];
+      const vfIndex = args.indexOf("-vf");
+      expect(vfIndex).toBeGreaterThan(-1);
+      expect(args[vfIndex + 1]).toBe("ass=captions/subtitle.ass");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("无 BGM 时也走 -filter_complex（anull 透传 + apad），保持 -shortest", async () => {
+    vi.mocked(spawn).mockReturnValue(fakeProcessExit("ok", 0) as never);
+    const dir = mkdtempSync(join(tmpdir(), "vf-compose-"));
+    try {
+      await composeVideo(makeOptions(dir));
+      const args = (vi.mocked(spawn).mock.calls[0] as unknown as [string, string[]])[1];
+      const filter = args[args.indexOf("-filter_complex") + 1]!;
+      expect(filter).toContain("anull");
+      expect(filter).toContain("apad");
+      expect(args).toContain("-shortest");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

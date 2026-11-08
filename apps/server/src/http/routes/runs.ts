@@ -3,6 +3,7 @@ import { VideoForgeError } from "@videoforge/shared";
 import type { HttpDeps } from "../deps.js";
 import { createAuthPreHandler, requireActor } from "../auth-hook.js";
 import { assertProjectLease } from "../../workflow/lease.js";
+import { assertProjectRunnable } from "../../domain/project-contract.js";
 import { getProject } from "../../db/repositories/project-repository.js";
 import { createRun, getRun, listRuns } from "../../db/repositories/run-repository.js";
 import { listRunStages } from "../../db/repositories/run-stage-repository.js";
@@ -68,14 +69,19 @@ export function registerRunRoutes(app: FastifyInstance, deps: HttpDeps): void {
 
   /**
    * 从断点续跑发起一个新 run（见设计文档 §4.2 `/api/projects/:id/runs`）。
-   * 解析会话 → 租约检查（冲突抛 PROJECT_BUSY → 409）→ 建 run → 非阻塞触发工作流。
+   * 解析会话 → 契约版本校验（非 v2 抛 CONFIG_INVALID 并附迁移提示）→ 租约检查
+   * （冲突抛 PROJECT_BUSY → 409）→ 建 run → 非阻塞触发工作流。
    */
   app.post("/api/projects/:id/runs", { preHandler: authPreHandler }, async (request, reply) => {
     const actor = requireActor(request);
     const { id } = request.params as { id: string };
-    if (!getProject(deps.db, actor, id)) {
+    const project = getProject(deps.db, actor, id);
+    if (!project) {
       throw new VideoForgeError("AUTH_FORBIDDEN", `项目不存在：${id}`);
     }
+
+    // 存量（契约非 v2）项目续跑会因 legacy 通道缺失而中途失败，这里提前明确拦截
+    assertProjectRunnable(project.contract_version);
 
     // 解析目标会话：显式传入时校验归属与本项目；缺省时取该项目最新会话
     const body = (request.body ?? {}) as { sessionId?: unknown };

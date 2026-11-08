@@ -1,30 +1,41 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
-import { VideoForgeError, type OutputProfile } from "@videoforge/shared";
+import { dirname } from "node:path";
 import {
-  assertSceneCodeSafe,
-  buildFallbackSceneCode,
-  getProfile,
-  sceneCodeSchema,
-  vendorGsap,
-  wrapSceneDocument,
-  type SceneCode,
-} from "@videoforge/template-sdk";
+  VideoForgeError,
+  type CopyDocV2,
+  type OutputProfile,
+  type ShotV2,
+} from "@videoforge/shared";
 import { arkChatCompletion } from "./ark-client.js";
-import { readCopyDoc, writeCopyDoc } from "./copy-contract.js";
+import { readCopyDocument } from "./copy-contract.js";
 import { loadSystemConfig, type SystemConfig } from "./config.js";
 import { getArkApiKey } from "./env.js";
 import { appendGenerationRecord, resolveSceneScope } from "./manifest.js";
 import { loadPromptSet, renderTemplate, type PromptSet } from "./prompts.js";
+import { SCENE_SPEC_RELATIVE_PATH, readSceneSpec, writeSceneSpec } from "./scene-spec-store.js";
+import {
+  buildShotSpecs,
+  formatComponentCatalog,
+  mergeSceneSpecShots,
+  parseSceneSelectionJson,
+} from "./scene-spec-build.js";
+import { readThemeSnapshot } from "./theme.js";
 
-/** 加载系统配置与 Ark 凭据；配置非法或密钥缺失时由底层抛错（不记录密钥） */
+/**
+ * scene 阶段能力（v2）：模型只做组件选型与填参，产物为 `scenes/spec.json`。
+ *
+ * T501 起 legacy 场景代码路径（LLM 直出 HTML/GSAP + 降级模板）已随渲染通道一并移除，
+ * 仅支持 v2 项目；旧项目（copy.json 契约版本 1.0）给出明确迁移提示。
+ * 仅读取显式入参，不读写进程 argv/stdout。
+ */
+
+/** 加载系统配置与 Ark 凭据；配置非法或密钥缺失时由底层抛错（不记录密钥）。 */
 function loadArk(rootDir: string) {
   const config = loadSystemConfig({ rootDir });
   const apiKey = getArkApiKey(rootDir);
   return { config, apiKey, ark: config.engines.endpoints.ark };
 }
 
-/** 解析本次使用的提示词集：显式 promptSet 优先，其次配置 prompts.default_set，缺省 default */
+/** 解析本次使用的提示词集：显式 promptSet 优先，其次配置 prompts.default_set，缺省 default。 */
 function resolvePrompts(
   rootDir: string,
   promptSet: string | undefined,
@@ -34,29 +45,6 @@ function resolvePrompts(
     rootDir,
     setName: promptSet?.trim() || config.prompts?.default_set,
   });
-}
-
-/** 从模型输出解析场景代码（容忍 ```json 围栏）；结构或安全校验非法抛 ADAPTER_PROTOCOL_INVALID */
-function parseSceneCodeJson(text: string): SceneCode {
-  const cleaned = text
-    .replace(/^```(?:json)?/m, "")
-    .replace(/```$/m, "")
-    .trim();
-  let raw: unknown;
-  try {
-    raw = JSON.parse(cleaned);
-  } catch {
-    throw new VideoForgeError("ADAPTER_PROTOCOL_INVALID", "场景模型未输出合法 JSON");
-  }
-  const result = sceneCodeSchema.safeParse(raw);
-  if (!result.success) {
-    throw new VideoForgeError(
-      "ADAPTER_PROTOCOL_INVALID",
-      `场景 JSON 结构非法：${result.error.issues[0]?.message ?? "unknown"}`,
-    );
-  }
-  assertSceneCodeSafe(result.data);
-  return result.data;
 }
 
 /**
@@ -72,50 +60,31 @@ async function arkChatWithRetry(options: Parameters<typeof arkChatCompletion>[0]
   }
 }
 
-/** 降级场景 HTML 文件头标记：--only-fallbacks 断点续跑时据此识别需重生成的场景 */
-const FALLBACK_MARKER = "<!-- videoforge:fallback -->";
-
-/**
- * 限并发映射：按顺序取任务、最多 concurrency 个同时进行，结果保持入参顺序；
- * 单个任务失败不中断其他任务，错误收集到 results 中由调用方处理。
- */
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  concurrency: number,
-  fn: (item: T, index: number) => Promise<R>,
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let next = 0;
-  const workers = Array.from(
-    { length: Math.max(1, Math.min(concurrency, items.length)) },
-    async () => {
-      while (next < items.length) {
-        const index = next;
-        next += 1;
-        results[index] = await fn(items[index], index);
-      }
-    },
-  );
-  await Promise.all(workers);
-  return results;
+/** v2 场景生成的运行上下文（由 generateScenes 组装，避免重复加载配置/密钥）。 */
+interface SceneSpecV2Context {
+  copy: CopyDocV2;
+  workDir: string;
+  config: SystemConfig;
+  apiKey: string;
+  ark: SystemConfig["engines"]["endpoints"]["ark"];
+  prompts: PromptSet;
 }
 
 /**
- * scene:gen 阶段能力：调用 Ark 生成 HTML+GSAP 动画场景，落盘 <工作目录>/scenes/<sceneId>.html 并回填 htmlPath；
- * 单场景模型输出不可用时降级内置动画模板（Ken Burns + 字幕条），不中断整批生成。
- * 多场景按 concurrency 限并发执行；onlyFallbacks=true 时仅重生成 html 缺失或仍带降级标记的场景
- * （断点续跑），已成功的 LLM 场景原样保留。仅读取显式入参，不读写进程 argv/stdout。
+ * scene 阶段能力：调用 Ark 选型填参并落盘 `<工作目录>/scenes/spec.json`（v2）。
+ * 模型整体失败时所有 component 镜头降级关键词块，非 component 镜头仍按 copy 装配，不中断整批。
  * @param options.rootDir 仓库根目录（用于加载配置、密钥与提示词集）
- * @param options.copyPath 输入 copy.json 路径
- * @param options.promptSet 提示词集名（--prompt-set）；缺省回退配置 prompts.default_set
- * @param options.profile 输出画幅（CLI 层已校验并填默认）
- * @param options.onlyFallbacks true 时仅重生成降级/缺失场景（--only-fallbacks）
- * @param options.concurrency 限并发度（CLI 层已取默认 3）
+ * @param options.copyPath 输入 copy.json 路径（必须是 v2）
+ * @param options.promptSet 提示词集名；缺省回退配置 prompts.default_set
+ * @param options.profile 输出画幅（仅保留入参兼容，v2 选型不需要）
+ * @param options.onlyFallbacks true 时已有 spec 条目的镜头不重复选型（断点续跑）
+ * @param options.concurrency 限并发度（v2 选型为单次调用，保留入参兼容）
  * @param options.outFile 回填后的 copy.json 输出路径；缺省原地覆盖 copyPath
  * @param options.runId 运行 ID（--run-id）；缺省用 copy.json 所在目录名
  * @param options.sceneIds 只重生成这些场景；缺省为全部场景
  * @param options.promptOverride 单场景额外要求（仅允许配合单个 sceneId 使用）
- * @returns 各场景 HTML 路径与降级场景 ID 列表（供调用方拼装 stdout JSON）
+ * @returns spec.json 路径、降级镜头 ID 列表与已装配镜头 ID 列表
+ * @throws VideoForgeError(`CONFIG_INVALID`) 项目仍是 v1（legacy 路径已移除）
  */
 export async function generateScenes(options: {
   rootDir: string;
@@ -129,7 +98,15 @@ export async function generateScenes(options: {
   sceneIds?: string[];
   promptOverride?: string;
 }): Promise<{ scenes: Array<string | undefined>; fallbacks: string[]; generated: string[] }> {
-  const doc = readCopyDoc(options.copyPath);
+  const document = readCopyDocument(options.copyPath);
+  // T501：legacy 场景/渲染代码路径已移除，仅支持 v2 项目
+  if (document.version !== "2") {
+    throw new VideoForgeError(
+      "CONFIG_INVALID",
+      "旧项目（copy.json 契约版本 1.0）不再支持场景生成：legacy HTML/GSAP 场景与 Playwright 渲染通道已在 v2 重构中移除，请用当前版本新建项目重新生成。",
+    );
+  }
+  const workDir = dirname(options.copyPath);
   const { config, apiKey, ark } = loadArk(options.rootDir);
   if (ark.chat_model === "PLEASE_FILL_CHAT_MODEL_ID") {
     throw new VideoForgeError(
@@ -138,22 +115,65 @@ export async function generateScenes(options: {
     );
   }
   const prompts = resolvePrompts(options.rootDir, options.promptSet, config);
-  const profile = options.profile;
-  const spec = getProfile(profile);
-  // 场景系统提示词支持 {width}/{height} 模板变量，按画幅注入
-  const sceneSystemPrompt = renderTemplate(prompts.sceneSystem, {
-    width: spec.width,
-    height: spec.height,
+  return generateSceneSpecsV2(options, {
+    copy: document.doc,
+    workDir,
+    config,
+    apiKey,
+    ark,
+    prompts,
   });
-  const workDir = dirname(options.copyPath);
-  vendorGsap(join(workDir, "vendor"));
-  const scenesDir = join(workDir, "scenes");
-  mkdirSync(scenesDir, { recursive: true });
-  const onlyFallbacks = options.onlyFallbacks;
-  const concurrency = options.concurrency;
-  // 定向重生成：只处理显式指定的场景，避免"改一个场景导致全部重画"
+}
+
+/**
+ * 构造选型请求的用户内容：只给 component 镜头与必要上下文，避免把整份 copy 塞进提示词。
+ * @param shots 待选型的 component 镜头
+ * @param promptOverride 单镜头额外要求（可选）
+ * @returns JSON 文本
+ */
+function buildSceneSelectionUserContent(shots: ShotV2[], promptOverride?: string): string {
+  const payload = {
+    shots: shots.map((shot) => ({
+      shotId: shot.shotId,
+      narration: shot.narration,
+      onScreenText: shot.onScreenText,
+      emphasis: shot.emphasis,
+      visualType: shot.visualType,
+      sourceRef: shot.sourceRef ?? null,
+    })),
+    ...(promptOverride ? { extraRequirement: promptOverride } : {}),
+  };
+  return JSON.stringify(payload, null, 2);
+}
+
+/**
+ * v2 scene 阶段：模型只选型填参 → 装配期校验/降级 → 合并写 `scenes/spec.json`。
+ * 模型整体失败时所有 component 镜头降级关键词块，非 component 镜头仍按 copy 装配。
+ * @param options generateScenes 的原始入参
+ * @param context 配置、密钥、提示词与工作目录
+ * @returns spec.json 路径、降级镜头 ID 与已装配镜头 ID
+ */
+async function generateSceneSpecsV2(
+  options: {
+    rootDir: string;
+    copyPath: string;
+    promptSet?: string;
+    profile: OutputProfile;
+    onlyFallbacks: boolean;
+    concurrency: number;
+    outFile?: string;
+    runId?: string;
+    sceneIds?: string[];
+    promptOverride?: string;
+  },
+  context: SceneSpecV2Context,
+): Promise<{ scenes: Array<string | undefined>; fallbacks: string[]; generated: string[] }> {
+  const { copy, workDir, apiKey, ark, prompts } = context;
+  const existing = readSceneSpec(workDir);
+
+  // 定向范围沿用 sceneIds（每镜归属章节）；promptOverride 仍只允许单场景
   const scope = resolveSceneScope(
-    doc.scenes.map((scene) => scene.sceneId),
+    copy.scenes.map((scene) => scene.sceneId),
     options.sceneIds,
   );
   if (options.promptOverride !== undefined && scope.length !== 1) {
@@ -163,86 +183,97 @@ export async function generateScenes(options: {
     );
   }
   const scopeSet = new Set(scope);
-  // 断点续跑：仅挑选 html 缺失或文件头带降级标记的场景重新生成
-  const pending = doc.scenes.filter((scene) => {
-    if (!scopeSet.has(scene.sceneId)) return false;
-    if (!onlyFallbacks) return true;
-    const htmlPath = scene.htmlPath ?? join(scenesDir, `${scene.sceneId}.html`);
-    if (!existsSync(htmlPath)) return true;
-    return readFileSync(htmlPath, "utf-8").includes(FALLBACK_MARKER);
-  });
-  const fallbacks: string[] = [];
-  const generated: string[] = [];
-  await mapWithConcurrency(pending, concurrency, async (scene) => {
-    const imageRelPath = scene.imagePath ? `../images/${basename(scene.imagePath)}` : undefined;
-    // 用户级精确要求只在单场景定向重生成时追加，避免污染其余场景
-    const userContent = [
-      `场景标题：${scene.title}`,
-      `口播文案：${scene.narration}`,
-      `画幅：${spec.width}x${spec.height}`,
-      `底图相对路径（可作为 <img> 的 src 直接引用）：${imageRelPath ?? "无（请用渐变背景）"}`,
-      ...(options.promptOverride ? [`额外要求：${options.promptOverride}`] : []),
-    ].join("\n");
-    const prompt = `${sceneSystemPrompt}\n\n---\n\n${userContent}`;
+  const scopedShots = copy.scenes
+    .filter((scene) => scopeSet.has(scene.sceneId))
+    .flatMap((scene) => scene.shots);
+
+  // 断点续跑：已有 spec 条目的镜头不重复选型
+  const pending = options.onlyFallbacks
+    ? scopedShots.filter((shot) => !existing?.shots.some((spec) => spec.shotId === shot.shotId))
+    : scopedShots;
+  const componentShots = pending.filter((shot) => shot.visualType === "component");
+
+  // 动效时长取主题 motion 边界内的 400ms，缺主题快照时用默认值
+  let animationDurationMs = 400;
+  try {
+    const theme = readThemeSnapshot(workDir)?.theme;
+    if (theme) {
+      animationDurationMs = Math.min(
+        Math.max(400, theme.motion.min_duration_ms),
+        theme.motion.max_duration_ms,
+      );
+    }
+  } catch (err) {
+    console.warn(
+      `[scene:gen] 读取主题快照失败，动效使用默认 400ms：${(err as Error).message}`,
+    );
+  }
+
+  let selections: ReturnType<typeof parseSceneSelectionJson> = [];
+  let failure: unknown;
+  let arkDurationMs = 0;
+  if (componentShots.length > 0) {
+    const systemPrompt = renderTemplate(prompts.sceneV2System, {
+      catalog: formatComponentCatalog(),
+    });
+    const userContent = buildSceneSelectionUserContent(componentShots, options.promptOverride);
     const startedAt = Date.now();
-    let code: SceneCode;
-    let fallback = false;
-    let failure: unknown;
     try {
       const text = await arkChatWithRetry({
         baseUrl: ark.base_url,
         apiKey,
         model: ark.chat_model,
         messages: [
-          { role: "system", content: sceneSystemPrompt },
+          { role: "system", content: systemPrompt },
           { role: "user", content: userContent },
         ],
       });
-      code = parseSceneCodeJson(text);
+      selections = parseSceneSelectionJson(text);
     } catch (err) {
-      fallback = true;
       failure = err;
       console.info(
-        `[scene:gen] 场景 ${scene.sceneId} 模型输出不可用，降级内置动画：${(err as Error).message}`,
+        `[scene:gen] 组件选型不可用，全部降级关键词块：${(err as Error).message}`,
       );
-      code = buildFallbackSceneCode(
-        { sceneId: scene.sceneId, title: scene.title, narration: scene.narration },
-        imageRelPath,
-      );
-      fallbacks.push(scene.sceneId);
     }
-    const htmlPath = join(scenesDir, `${scene.sceneId}.html`);
-    const html = wrapSceneDocument(code, { width: spec.width, height: spec.height });
-    // 降级产物写入文件头标记，供 --only-fallbacks 续跑时识别
-    writeFileSync(htmlPath, (fallback ? FALLBACK_MARKER + "\n" : "") + html, "utf-8");
-    scene.htmlPath = htmlPath;
-    generated.push(scene.sceneId);
+    arkDurationMs = Date.now() - startedAt;
     appendGenerationRecord(workDir, {
       runId: options.runId,
       stage: "scene",
-      sceneId: scene.sceneId,
-      assetPath: `scenes/${scene.sceneId}.html`,
+      assetPath: SCENE_SPEC_RELATIVE_PATH,
       model: ark.chat_model,
       promptSet: prompts.name,
-      prompt,
+      prompt: `${systemPrompt}\n\n---\n\n${userContent}`,
       params: {
-        width: spec.width,
-        height: spec.height,
+        componentShots: componentShots.length,
+        pendingShots: pending.length,
         overridden: options.promptOverride !== undefined,
       },
-      templateSnapshot: { "scene-system.txt": prompts.sceneSystem },
-      ok: true,
-      fallback,
+      templateSnapshot: { "scene-v2-system.txt": prompts.sceneV2System },
+      ok: failure === undefined,
+      fallback: failure !== undefined,
       ...(failure
         ? {
             errorCode: failure instanceof VideoForgeError ? failure.code : "ADAPTER_FAILED",
             errorMessage: failure instanceof Error ? failure.message : String(failure),
           }
         : {}),
-      durationMs: Date.now() - startedAt,
+      durationMs: arkDurationMs,
+      contractVersion: "2.0",
     });
+  }
+
+  const built = buildShotSpecs({
+    copy,
+    selections,
+    shotIds: pending.map((shot) => shot.shotId),
+    animationDurationMs,
   });
-  fallbacks.sort();
-  writeCopyDoc(options.outFile ?? options.copyPath, doc);
-  return { scenes: doc.scenes.map((s) => s.htmlPath), fallbacks, generated };
+  const merged = mergeSceneSpecShots(existing, built.shots, copy.theme.id);
+  writeSceneSpec(workDir, merged);
+
+  return {
+    scenes: [SCENE_SPEC_RELATIVE_PATH],
+    fallbacks: built.fallbackShotIds,
+    generated: built.shots.map((shot) => shot.shotId),
+  };
 }

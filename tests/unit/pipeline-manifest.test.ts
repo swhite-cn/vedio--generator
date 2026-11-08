@@ -40,6 +40,36 @@ describe("生成清单：追加式落盘", () => {
     expect(readGenerationRecords(projectDir)).toEqual([record]);
   });
 
+  test("生成记录默认携带契约版本 1.0，显式 2.0 会保留", () => {
+    const legacy = appendGenerationRecord(projectDir, {
+      stage: "image",
+      sceneId: "s1",
+      assetPath: "images/s1.png",
+      ok: true,
+    });
+    expect(legacy.contractVersion).toBe("1.0");
+
+    const v2 = appendGenerationRecord(projectDir, {
+      stage: "image",
+      sceneId: "s2",
+      assetPath: "images/s2.png",
+      ok: true,
+      contractVersion: "2.0",
+    });
+    expect(v2.contractVersion).toBe("2.0");
+  });
+
+  test("旧记录缺少 contractVersion 时读取归一化为 1.0", () => {
+    const path = join(projectDir, GENERATION_MANIFEST_PATH);
+    mkdirSync(join(projectDir, "manifest"), { recursive: true });
+    writeFileSync(
+      path,
+      `${JSON.stringify({ id: "old-1", stage: "copy", ok: true, createdAt: "2026-01-01" })}\n`,
+      "utf-8",
+    );
+    expect(readGenerationRecords(projectDir)[0].contractVersion).toBe("1.0");
+  });
+
   test("同一场景重新生成产生新记录，并通过 supersedesId 串成版本链", () => {
     const first = appendGenerationRecord(projectDir, {
       stage: "image",

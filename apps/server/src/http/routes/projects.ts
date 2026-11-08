@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
-import type { Actor, Project, ProjectStatus } from "@videoforge/shared";
-import { VideoForgeError } from "@videoforge/shared";
+import type { Actor, Project } from "@videoforge/shared";
+import { CONTRACT_VERSION_V2, VideoForgeError } from "@videoforge/shared";
+import { ensureProjectManifest, ensureThemeSnapshot, loadTheme } from "@videoforge/pipeline";
 import type { HttpDeps } from "../deps.js";
 import { createAuthPreHandler, requireActor } from "../auth-hook.js";
 import { buildArtifactIndex, type ArtifactIndex } from "../artifacts.js";
@@ -8,6 +9,7 @@ import { getCapability } from "../../workflow/capabilities.js";
 import { assertProjectLease } from "../../workflow/lease.js";
 import { verifyStageArtifact } from "../../workflow/breakpoint.js";
 import { deriveProjectStatus } from "../../domain/project-status.js";
+import { deriveProjectMetrics } from "../../domain/project-metrics.js";
 import { resolveUserProjectDir } from "../../domain/storage-layout.js";
 import {
   createProject,
@@ -28,19 +30,14 @@ import { syncGeneratedProjectAssets } from "../../domain/project-assets.js";
 const DEFAULT_PROFILE = "landscape-1080p";
 
 /**
- * 推导单个项目的运行状态（纯函数 `deriveProjectStatus` 的数据装配层）。
+ * 推导单个项目的运行状态与派生指标（方案 §7.5：前端不推导）。
  * @param db Drizzle 数据库实例
  * @param actor 请求主体
  * @param project 项目
  * @param projectDir 项目绝对目录
- * @returns 推导出的项目状态
+ * @returns 状态、派生指标与最新 run（无 run 时为 `null`）
  */
-function deriveStatusForProject(
-  db: any,
-  actor: Actor,
-  project: Project,
-  projectDir: string,
-): ProjectStatus {
+function assembleProjectView(db: any, actor: Actor, project: Project, projectDir: string) {
   const runs = listRuns(db, actor, project.id);
   const runStages = runs.flatMap((run) => listRunStages(db, actor, run.id));
   const capability = getCapability(project.capability_id);
@@ -50,7 +47,9 @@ function deriveStatusForProject(
     { kind: "file", relativePath: finalRelativePath },
     project.profile,
   );
-  return deriveProjectStatus({ runs, runStages, artifacts: { finalVideoExists } });
+  const status = deriveProjectStatus({ runs, runStages, artifacts: { finalVideoExists } });
+  const metrics = deriveProjectMetrics({ projectDir, runs, runStages });
+  return { status, metrics, latestRun: runs[0] ?? null };
 }
 
 /**
@@ -61,18 +60,18 @@ function deriveStatusForProject(
 export function registerProjectRoutes(app: FastifyInstance, deps: HttpDeps): void {
   const authPreHandler = createAuthPreHandler(app);
 
-  /** 列出当前用户全部项目，附推导状态。 */
+  /** 列出当前用户全部项目，附推导状态、派生指标与最新 run（方案 §7.1/§7.5）。 */
   app.get("/api/projects", { preHandler: authPreHandler }, async (request, reply) => {
     const actor = requireActor(request);
-    const projects = listProjects(deps.db, actor).map((project) => ({
-      ...project,
-      status: deriveStatusForProject(
+    const projects = listProjects(deps.db, actor).map((project) => {
+      const { status, metrics, latestRun } = assembleProjectView(
         deps.db,
         actor,
         project,
         resolveUserProjectDir(deps.storageRoot, actor.userId, project.name),
-      ),
-    }));
+      );
+      return { ...project, status, ...metrics, latestRun };
+    });
     reply.code(200);
     return { projects };
   });
@@ -100,6 +99,13 @@ export function registerProjectRoutes(app: FastifyInstance, deps: HttpDeps): voi
     }
     const params = parsed.data as { topic: string; style?: string; profile?: string };
 
+    // ②.1 可选主题：先加载校验，未知主题直接 CONFIG_INVALID（v1 项目不传则跳过）
+    const themeIdInput =
+      typeof body.themeId === "string" && body.themeId.trim().length > 0
+        ? body.themeId.trim()
+        : null;
+    const theme = themeIdInput ? loadTheme({ rootDir: deps.rootDir, themeId: themeIdInput }) : null;
+
     // ③ 项目名额上限
     if (listProjects(deps.db, actor).length >= deps.config.server.max_projects_per_user) {
       throw new VideoForgeError("CONFIG_INVALID", "项目数量已达上限");
@@ -114,10 +120,33 @@ export function registerProjectRoutes(app: FastifyInstance, deps: HttpDeps): voi
       topic: params.topic,
       style: params.style ?? null,
       profile: params.profile ?? DEFAULT_PROFILE,
+      themeId: theme?.id ?? null,
+      // 新项目一律 v2 契约（方案 §6.3）：legacy 渲染通道已移除，v1 无法续跑
+      contractVersion: CONTRACT_VERSION_V2,
     });
 
     // ⑤ 自动建会话
     const session = createSession(deps.db, actor, { projectId: project.id, title: params.topic });
+
+    // ⑤.1 写项目清单快照（contractVersion/themeId）；失败不影响项目创建
+    const projectDir = resolveUserProjectDir(deps.storageRoot, actor.userId, project.name);
+    try {
+      ensureProjectManifest(projectDir, {
+        contractVersion: project.contract_version,
+        themeId: project.theme_id,
+      });
+    } catch (err) {
+      app.log.warn({ err, projectId: project.id }, "[http] 写入项目清单失败");
+    }
+
+    // ⑤.2 写主题快照（冻结创建时视觉语言，后续切换主题不覆盖）；失败不影响项目创建
+    if (theme) {
+      try {
+        ensureThemeSnapshot(projectDir, theme);
+      } catch (err) {
+        app.log.warn({ err, projectId: project.id }, "[http] 写入主题快照失败");
+      }
+    }
 
     // ⑥ 租约检查（新建项目时为恒真）+ 建首个 run
     assertProjectLease(deps.db, actor, project.id);
@@ -125,6 +154,7 @@ export function registerProjectRoutes(app: FastifyInstance, deps: HttpDeps): voi
       projectId: project.id,
       sessionId: session.id,
       trigger: "user",
+      contractVersion: project.contract_version,
     });
 
     // ⑦ 异步触发工作流（不 await，避免 HTTP 长时间挂起）
@@ -137,7 +167,7 @@ export function registerProjectRoutes(app: FastifyInstance, deps: HttpDeps): voi
     return { project, session, run };
   });
 
-  /** 项目详情：状态 + 产物索引。 */
+  /** 项目详情：状态 + 派生指标 + 最新 run + 产物索引。 */
   app.get("/api/projects/:id", { preHandler: authPreHandler }, async (request, reply) => {
     const actor = requireActor(request);
     const { id } = request.params as { id: string };
@@ -147,7 +177,7 @@ export function registerProjectRoutes(app: FastifyInstance, deps: HttpDeps): voi
     }
 
     const projectDir = resolveUserProjectDir(deps.storageRoot, actor.userId, project.name);
-    const status = deriveStatusForProject(deps.db, actor, project, projectDir);
+    const { status, metrics, latestRun } = assembleProjectView(deps.db, actor, project, projectDir);
     const capability = getCapability(project.capability_id);
     const artifacts: ArtifactIndex = capability
       ? buildArtifactIndex(projectDir, capability, project.profile)
@@ -155,7 +185,7 @@ export function registerProjectRoutes(app: FastifyInstance, deps: HttpDeps): voi
     syncGeneratedProjectAssets(deps.db, actor, project, artifacts);
 
     reply.code(200);
-    return { project: { ...project, status }, artifacts };
+    return { project: { ...project, status, ...metrics, latestRun }, artifacts };
   });
 
   /** 列出项目下的会话（先判项目归属，再列）。 */

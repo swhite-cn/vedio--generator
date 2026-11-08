@@ -1,0 +1,25 @@
+{
+  "version": "1",
+  "runId": "run-fixture-001",
+  "generatedAt": "2026-11-03T10:00:00.000Z",
+  "checks": [
+    { "id": "freeze", "label": "静帧检测", "status": "pass", "violations": [] },
+    {
+      "id": "subtitle-overflow",
+      "label": "字幕溢出",
+      "status": "fail",
+      "violations": [
+        { "shotId": "sh-034", "detail": "超 18 字：24 字" },
+        { "shotId": "sh-057", "detail": "超 18 字：21 字" }
+      ]
+    },
+    {
+      "id": "source-label",
+      "label": "来源标签",
+      "status": "fail",
+      "violations": [{ "shotId": "sh-041", "detail": "数据类镜头缺少来源" }]
+    },
+    { "id": "contrast", "label": "画面对比度", "status": "pass", "violations": [] },
+    { "id": "animation-duration", "label": "动效时长", "status": "pass", "violations": [] }
+  ]
+}

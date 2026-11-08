@@ -49,6 +49,20 @@ describe("项目仓储", () => {
     expect(project.status).toBe("draft");
   });
 
+  test("v2 主题与契约版本随项目创建写入", () => {
+    const project = createProject(database.db, userA, {
+      capabilityId: "video-generation",
+      name: "v2-project",
+      topic: "水银变黄金",
+      profile: "landscape-1080p",
+      themeId: "documentary-dark",
+      contractVersion: "2.0",
+    });
+    expect(project.theme_id).toBe("documentary-dark");
+    expect(project.contract_version).toBe("2.0");
+    expect(getProject(database.db, userA, project.id)?.contract_version).toBe("2.0");
+  });
+
   test("同名冲突在用户范围内追加 -2、-3", () => {
     expect(makeProject(userA, "demo").name).toBe("demo");
     expect(makeProject(userA, "demo").name).toBe("demo-2");

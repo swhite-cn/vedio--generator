@@ -1,0 +1,39 @@
+# 硬核科普深色主题：深底 + 米白文字 + 柠檬黄强调
+# 与输出 Profile 解耦：Profile 管分辨率，主题管视觉语言。
+id: documentary-dark
+name: 硬核科普深色
+frame:
+  # 设计画布尺寸（成片按 Profile 缩放）
+  width: 1920
+  height: 1080
+  # 安全区比例（0–1），元素需落在画布中心 90% 区域内
+  safe_area: 0.9
+tokens:
+  # 成片文字色（#RRGGBB）
+  text: "#E5E0D5"
+  # 成片背景色（#RRGGBB）
+  background: "#111310"
+  # 强调色：下划线、数字高亮（#RRGGBB）
+  accent: "#F1E21D"
+  # 辅助色板：图表/对比条等次要元素（#RRGGBB）
+  secondary: ["#B33630", "#3BD5B0", "#4904F5"]
+  # 字体族（按顺序回退）
+  font_family: "PingFang SC, Microsoft YaHei, system-ui"
+  # 标题字号（设计像素）
+  title_size: 96
+  # 正文字号（设计像素）
+  body_size: 40
+  caption:
+    # 字幕字号（设计像素）
+    size: 44
+    # 字幕描边宽度（像素），0 表示无描边
+    stroke: 4
+    # 字幕底边距离占画面高度比例（0–1）
+    bottom_ratio: 0.06
+    # 单行最大字数；超过即触发字幕溢出质检
+    max_chars_per_line: 18
+motion:
+  # 动效最短时长（毫秒），只能落在 300–800
+  min_duration_ms: 300
+  # 动效最长时长（毫秒），只能落在 300–800
+  max_duration_ms: 800

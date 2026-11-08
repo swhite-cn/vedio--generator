@@ -1,9 +1,8 @@
 <script setup lang="ts">
 /**
- * 管理视图（Web 专题 §5.6，仅 admin）：全站只读监控 + 唯一救援写操作（重置密码）。
+ * 管理视图（方案 §8.5 第 10 页，仅 admin）：4 KPI + 用户/项目/Runs/登录日志。
  *
- * 三 Tab：用户（可重置密码）、项目（只读，可按状态筛选）、Runs（只读，可按状态/错误码筛选，
- * 行内「Trace」跳 run Trace 视图）。非 admin 越权时服务端返回 `AUTH_FORBIDDEN`，页面渲染 `Result 403`。
+ * 只读监控 + 唯一救援写操作（重置密码）。非 admin 访问由路由守卫与服务端 403 双重拦截。
  */
 import { computed, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
@@ -16,6 +15,7 @@ import { formatApiError } from "../services/api";
 import { formatDateTime, formatElapsed } from "../components/format";
 import { mapProjectStatus, mapRunStatus } from "../components/state-mapping";
 import StateTag from "../components/StateTag.vue";
+import VfPill from "../components/ui/VfPill.vue";
 
 const router = useRouter();
 const admin = useAdminStore();
@@ -67,6 +67,16 @@ const runColumns = [
   { title: "操作", key: "trace", width: 90 },
 ];
 
+/** 登录日志表列定义。 */
+const loginColumns = [
+  { title: "时间", dataIndex: "created_at", key: "created_at", width: 170 },
+  { title: "用户", dataIndex: "username", key: "username", width: 140 },
+  { title: "结果", key: "ok", width: 90 },
+  { title: "原因", dataIndex: "reason", key: "reason", width: 150 },
+  { title: "IP", dataIndex: "ip", key: "ip", width: 130 },
+  { title: "User-Agent", dataIndex: "user_agent", key: "user_agent" },
+];
+
 /** 状态筛选选项（项目 5 态）。 */
 const projectStatusOptions = ["draft", "running", "review", "done", "failed"].map((value) => ({
   value,
@@ -83,10 +93,47 @@ const runStatusOptions = ["queued", "running", "waiting_review", "done", "failed
 
 /** 任一 admin 请求返回 403 时整页渲染越权提示。 */
 const forbidden = computed(() =>
-  [admin.usersError, admin.projectsError, admin.runsError].some(
-    (error) => (error as { code?: string } | null)?.code === "AUTH_FORBIDDEN",
-  ),
+  [
+    admin.usersError,
+    admin.projectsError,
+    admin.runsError,
+    admin.overviewError,
+    admin.loginError,
+  ].some((error) => (error as { code?: string } | null)?.code === "AUTH_FORBIDDEN"),
 );
+
+/** 4 个 KPI 卡片（口径固定：成功率 = done/(done+failed)，canceled 不计；T405）。 */
+const kpis = computed(() => [
+  {
+    key: "users",
+    label: "注册用户",
+    value: admin.overview?.totalUsers ?? "—",
+    hint: "全部账号",
+  },
+  {
+    key: "projects",
+    label: "项目总数",
+    value: admin.overview?.totalProjects ?? "—",
+    hint: "全站项目",
+  },
+  {
+    key: "week",
+    label: "本周运行",
+    value: admin.overview?.runsThisWeek ?? "—",
+    hint: "本周一 00:00 起（本地时区）",
+  },
+  {
+    key: "rate",
+    label: "运行成功率",
+    value:
+      admin.overview === null
+        ? "—"
+        : `${admin.overview.successRate}%`,
+    hint: admin.overview?.basis
+      ? `done ${admin.overview.basis.doneRuns} / (done+failed) ${admin.overview.basis.completedRuns} · canceled ${admin.overview.basis.canceledRuns ?? 0} 不计`
+      : "done / (done + failed)",
+  },
+]);
 
 /** 项目 id → 项目（用于 Runs 表联表展示项目名与属主）。 */
 const projectById = computed(() => {
@@ -109,12 +156,14 @@ function capabilityName(capabilityId: string): string {
   return capabilities.findById(capabilityId)?.name ?? capabilityId;
 }
 
-/** 加载管理数据（用户 + 项目 + Runs）。 */
+/** 加载管理数据（KPI + 用户 + 项目 + Runs + 登录日志）。 */
 async function loadAll(): Promise<void> {
   await Promise.all([
+    admin.loadOverview().catch((error) => console.warn("[web] 管理 KPI 加载失败", error)),
     admin.loadUsers().catch((error) => console.warn("[web] 管理用户列表加载失败", error)),
     admin.loadProjects().catch((error) => console.warn("[web] 管理项目列表加载失败", error)),
     admin.loadRuns().catch((error) => console.warn("[web] 管理 run 列表加载失败", error)),
+    admin.loadLoginEvents().catch((error) => console.warn("[web] 登录日志加载失败", error)),
   ]);
   try {
     await capabilities.load();
@@ -167,11 +216,11 @@ async function confirmReset(user: AdminUser): Promise<void> {
 }
 
 /**
- * 跳转某 run 的 Trace 视图（携带 `admin=1` 以走管理数据源）。
+ * 跳转某 run 的详情视图（新路由；`admin=1` 表示返回管理页）。
  * @param run run 视图
  */
 function goTrace(run: RunSummary): void {
-  void router.push(`/runs/${run.id}/trace?admin=1`);
+  void router.push(`/projects/${run.project_id}/runs/${run.id}?admin=1`);
 }
 
 onMounted(() => {
@@ -190,6 +239,15 @@ watch([runStatusFilter, runErrorCodeFilter], () => {
       <h1 class="page-title">管理</h1>
       <a-button @click="loadAll">刷新</a-button>
     </header>
+
+    <!-- 4 个 KPI -->
+    <section v-if="!forbidden" class="kpi-grid" aria-label="管理 KPI">
+      <article v-for="kpi in kpis" :key="kpi.key" class="kpi-card">
+        <span class="kpi-label">{{ kpi.label }}</span>
+        <span class="kpi-value is-mono">{{ kpi.value }}</span>
+        <span class="kpi-hint">{{ kpi.hint }}</span>
+      </article>
+    </section>
 
     <a-result v-if="forbidden" status="403" title="没有权限查看该内容" />
 
@@ -355,6 +413,47 @@ watch([runStatusFilter, runErrorCodeFilter], () => {
           </template>
         </a-table>
       </a-tab-pane>
+
+      <!-- 登录日志 -->
+      <a-tab-pane key="logins" tab="登录日志">
+        <a-result
+          v-if="admin.loginError"
+          status="warning"
+          title="登录日志加载失败"
+          sub-title="请检查服务是否在线后重试"
+        >
+          <template #extra>
+            <a-button type="primary" @click="admin.loadLoginEvents()">重试</a-button>
+          </template>
+        </a-result>
+        <a-table
+          v-else
+          :data-source="admin.loginEvents"
+          :columns="loginColumns"
+          :loading="admin.loginLoading"
+          row-key="id"
+          size="small"
+          :scroll="{ x: 'max-content' }"
+        >
+          <template #bodyCell="{ column, record }">
+            <template v-if="column.key === 'created_at'">{{
+              formatDateTime(record.created_at)
+            }}</template>
+            <template v-else-if="column.key === 'ok'">
+              <VfPill :tone="record.ok ? 'success' : 'danger'">
+                {{ record.ok ? "成功" : "失败" }}
+              </VfPill>
+            </template>
+            <template v-else-if="column.key === 'reason'">{{ record.reason ?? "-" }}</template>
+            <template v-else-if="column.key === 'ip'">{{ record.ip ?? "-" }}</template>
+            <template v-else-if="column.key === 'user_agent'">
+              <span class="ua" :title="record.user_agent ?? ''">
+                {{ record.user_agent ?? "-" }}
+              </span>
+            </template>
+          </template>
+        </a-table>
+      </a-tab-pane>
     </a-tabs>
   </div>
 </template>
@@ -369,8 +468,43 @@ watch([runStatusFilter, runErrorCodeFilter], () => {
 
 .page-title {
   margin: 0;
-  font-size: 22px;
-  font-weight: 700;
+  font-size: var(--font-size-page-title);
+  font-weight: var(--font-weight-strong);
+  color: var(--text);
+}
+
+/* 4 个 KPI */
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.kpi-card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+}
+
+.kpi-label {
+  font-size: var(--font-size-caption);
+  color: var(--text-ter);
+}
+
+.kpi-value {
+  font-size: 24px;
+  font-weight: var(--font-weight-strong);
+  color: var(--text);
+}
+
+.kpi-hint {
+  font-size: var(--font-size-caption);
+  color: var(--text-ter);
 }
 
 .admin-filter {
@@ -382,7 +516,21 @@ watch([runStatusFilter, runErrorCodeFilter], () => {
 }
 
 .admin-filter-label {
-  color: rgb(0 0 0 / 65%);
-  font-size: 13px;
+  color: var(--text-sec);
+  font-size: var(--font-size-small);
+}
+
+.ua {
+  display: inline-block;
+  max-width: 380px;
+  overflow: hidden;
+  color: var(--text-ter);
+  font-size: var(--font-size-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.is-mono {
+  font-family: var(--font-mono);
 }
 </style>

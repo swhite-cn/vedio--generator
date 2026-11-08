@@ -14,6 +14,7 @@ import { createProject } from "../../apps/server/src/db/repositories/project-rep
 import { createSession } from "../../apps/server/src/db/repositories/session-repository";
 import { createRun } from "../../apps/server/src/db/repositories/run-repository";
 import { recordToolCall } from "../../apps/server/src/db/repositories/trace-repository";
+import { createProjectAsset } from "../../apps/server/src/db/repositories/asset-repository";
 import { createEventBus } from "../../apps/server/src/http/event-bus";
 import { registerHttpRoutes } from "../../apps/server/src/http/index";
 import type { ChatPort, HttpDeps } from "../../apps/server/src/http/deps";
@@ -301,4 +302,138 @@ test("admin：GET /api/admin/runs/:id/trace 跨用户返回完整 trace", async 
   expect(Array.isArray(body.llmCalls)).toBe(true);
   expect(body.total.toolCalls).toBe(1);
   expect(body.paging).toEqual({ limit: 50, offset: 0 });
+});
+
+test("admin：GET /api/admin/overview 返回 4 个 KPI 且非 admin 403", async () => {
+  const { app } = await buildTestApp();
+  const userA = seedUser("ua");
+  const { actor, project, session } = seedProject(userA, "pa");
+  createRun(database.db, actor, {
+    projectId: project.id,
+    sessionId: session.id,
+    trigger: "user",
+    status: "done",
+  });
+  createRun(database.db, actor, {
+    projectId: project.id,
+    sessionId: session.id,
+    trigger: "user",
+    status: "failed",
+  });
+  const admin = seedUser("root", "admin");
+  const token = signAccessToken(app, admin);
+
+  const res = await app.inject({
+    method: "GET",
+    url: "/api/admin/overview",
+    headers: { authorization: `Bearer ${token}` },
+  });
+  expect(res.statusCode).toBe(200);
+  expect(res.json()).toMatchObject({
+    totalUsers: 2,
+    totalProjects: 1,
+    runsThisWeek: 2,
+    successRate: 50,
+    basis: { doneRuns: 1, failedRuns: 1, completedRuns: 2 },
+  });
+
+  const plain = signAccessToken(app, userA);
+  const forbidden = await app.inject({
+    method: "GET",
+    url: "/api/admin/overview",
+    headers: { authorization: `Bearer ${plain}` },
+  });
+  expect(forbidden.statusCode).toBe(403);
+});
+
+test("登录日志：成功与失败均追加记录，admin 可读且不含口令", async () => {
+  const { app } = await buildTestApp();
+  const user = seedUser("alice");
+  const admin = seedUser("root", "admin");
+
+  const failed = await app.inject({
+    method: "POST",
+    url: "/api/auth/login",
+    payload: { username: "alice", password: "wrong-password" },
+  });
+  expect(failed.statusCode).toBe(401);
+  const ok = await app.inject({
+    method: "POST",
+    url: "/api/auth/login",
+    payload: { username: "alice", password: PASSWORD },
+  });
+  expect(ok.statusCode).toBe(200);
+  expect(ok.body).not.toContain(PASSWORD);
+
+  const res = await app.inject({
+    method: "GET",
+    url: "/api/admin/login-events",
+    headers: { authorization: `Bearer ${signAccessToken(app, admin)}` },
+  });
+  expect(res.statusCode).toBe(200);
+  const events = res.json().events as Array<Record<string, unknown>>;
+  expect(events).toHaveLength(2);
+  expect(events.map((event) => event.ok).sort()).toEqual([false, true]);
+  expect(events.find((event) => event.ok === false)?.reason).toBe("INVALID_CREDENTIALS");
+  expect(res.body).not.toContain(PASSWORD);
+  expect(user.password_hash).not.toBe(PASSWORD);
+});
+
+test("搜索：项目/素材/组件三类命中且只返回当前用户数据", async () => {
+  const { app } = await buildTestApp();
+  const userA = seedUser("ua");
+  const { actor, project } = seedProject(userA, "科普视频");
+  createProjectAsset(database.db, actor, {
+    projectId: project.id,
+    source: "uploaded",
+    kind: "image",
+    label: "安全帽.png",
+    relativePath: "assets/uploaded/a.png",
+    mimeType: "image/png",
+    sizeBytes: 1,
+  });
+  const userB = seedUser("ub");
+  const { actor: actorB, project: projectB } = seedProject(userB, "科普视频B");
+  createProjectAsset(database.db, actorB, {
+    projectId: projectB.id,
+    source: "uploaded",
+    kind: "image",
+    label: "安全帽B.png",
+    relativePath: "assets/uploaded/b.png",
+    mimeType: "image/png",
+    sizeBytes: 1,
+  });
+
+  const res = await app.inject({
+    method: "GET",
+    url: "/api/search?q=科普",
+    headers: { authorization: `Bearer ${signAccessToken(app, userA)}` },
+  });
+  expect(res.statusCode).toBe(200);
+  const body = res.json();
+  expect(body.projects.map((item: { name: string }) => item.name)).toEqual(["科普视频"]);
+  expect(body.assets).toHaveLength(0);
+
+  const assetRes = await app.inject({
+    method: "GET",
+    url: `/api/search?q=${encodeURIComponent("安全帽")}`,
+    headers: { authorization: `Bearer ${signAccessToken(app, userA)}` },
+  });
+  const assetBody = assetRes.json();
+  expect(assetBody.assets).toHaveLength(1);
+  expect(assetBody.assets[0].label).toBe("安全帽.png");
+  expect(assetBody.assets[0].project_name).toBe("科普视频");
+
+  const componentRes = await app.inject({
+    method: "GET",
+    url: `/api/search?q=${encodeURIComponent("关键词")}`,
+    headers: { authorization: `Bearer ${signAccessToken(app, userA)}` },
+  });
+  expect(componentRes.json().components.length).toBeGreaterThan(0);
+  const empty = await app.inject({
+    method: "GET",
+    url: "/api/search?q=",
+    headers: { authorization: `Bearer ${signAccessToken(app, userA)}` },
+  });
+  expect(empty.json()).toEqual({ q: "", projects: [], assets: [], components: [] });
 });

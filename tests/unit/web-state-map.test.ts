@@ -101,16 +101,18 @@ describe("statusTooltip", () => {
 });
 
 describe("STAGE_LABELS", () => {
-  test("exposes the seven fixed stage labels in order", () => {
+  test("exposes the eight fixed stage labels in order", () => {
     expect(Object.keys(STAGE_LABELS)).toEqual([
       "copy",
       "image",
       "scene",
       "tts",
+      "captions",
       "storyboard",
       "render",
       "compose",
     ]);
+    expect(STAGE_LABELS.captions).toBe("字幕");
     expect(STAGE_LABELS.compose).toBe("合成");
   });
 });

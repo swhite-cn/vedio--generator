@@ -1,0 +1,11 @@
+{
+  "componentId": "comparison-bars",
+  "props": {
+    "labelA": "实验组",
+    "valueA": "128",
+    "labelB": "对照组",
+    "valueB": "64",
+    "unit": "次/分",
+    "caption": "神经元放电频率对比"
+  }
+}

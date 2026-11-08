@@ -5,7 +5,8 @@ import { VideoForgeError } from "@videoforge/shared";
 /**
  * 提示词集加载：把 copy:gen / image:gen / scene:gen 的系统提示词从代码常量的单一来源，
  * 扩展为「config/prompts/<集名>/ 目录下的模板文件优先、内置默认回退」的可配置机制。
- * - copy-system.txt：文案生成系统提示词（支持 {style} 变量）
+ * - copy-system.txt：v1 文案生成系统提示词（支持 {style} 变量）
+ * - copy-v2-system.txt：v2 文案提示词（一句一镜、风格锚、来源）
  * - image-suffix.txt：文生图提示词强制后缀（底图无文字约束，静态文本）
  * - scene-system.txt：动画场景生成系统提示词（支持 {width}/{height} 变量）
  * 内置回退保证：无配置文件的临时环境（如单元测试）与文件缺失场景下行为与旧版一致。
@@ -17,6 +18,35 @@ const BUILTIN_COPY_SYSTEM = [
   '{"title":"视频标题","scenes":[{"sceneId":"s1","title":"场景标题","narration":"口播文案（60-120字）","imagePrompt":"文生图提示词"}]}',
   "要求：4-8 个场景；sceneId 依次为 s1、s2…；narration 为中文口播；imagePrompt 描述具体画面。",
   "imagePrompt 只描述纯视觉画面（场景、物体、光影、构图），画面中不要出现任何文字——所有文字由后续动画层渲染。",
+].join("\n");
+
+/** 内置默认文案 v2 提示词（与 config/prompts/default/copy-v2-system.txt 一致） */
+const BUILTIN_COPY_V2_SYSTEM = [
+  "你是科普/历史短视频编剧。只输出严格 JSON，不要输出任何其他文字。结构：",
+  '{"title":"视频标题","styleAnchors":[{"key":"mercury","label":"水银","color":"#C9CED6"}],"scenes":[{"sceneId":"s1","chapterNo":1,"title":"章节标题","shots":[{"shotId":"sh-001","narration":"一句口播","onScreenText":"屏幕文字","emphasis":["关键词"],"visualType":"component","assetRefs":[],"anchorKeys":["mercury"],"transitionIn":"hard-cut","transitionOut":"hard-cut","sourceRef":{"label":"来源名"}}]}]}',
+  "要求：一句一镜，每镜口播 12-32 字、约 2-4 秒；全片 40-80 镜；每个 scene 是叙事章节，含 6-12 镜。",
+  "shotId 全片唯一，依次为 sh-001、sh-002…；sceneId 依次为 s1、s2…；chapterNo 从 1 开始。",
+  "onScreenText 不超过 18 字；emphasis 只放需要强调的 1-3 个词。",
+  "visualType 只能是 component、image、video、symbol 之一；不要输出 component 字段，组件选型由后续场景模板阶段完成。",
+  "涉及数据、事实或他人观点的镜头，必须提供 sourceRef.label；纯视觉镜头可为 null。",
+  "sourceRef.label 不超过 20 字（来源标签单行展示），可选 note 不超过 40 字。",
+  "开头 1-2 镜必须给出钩子：反常识结论、具体场景或悬念，禁止“今天我们来聊聊”这类空泛开场。",
+  "中段可用设问推进（每 6-10 镜最多一次），问题放在本镜，答案留到下一镜，不要自问自答。",
+  "涉及医疗、法律、金融投资等风险主题时，最后一个镜头的 narration 或 onScreenText 必须包含简短免责提示（如“具体请咨询专业人士”）；其他主题不强行添加。",
+  "styleAnchors 给出 3-6 个全片复用的符号，key 用英文，label 为中文，color 为 #RRGGBB。",
+  "transitionIn/transitionOut 只能是 hard-cut、title-card、fade-120；默认 hard-cut，仅在情绪转折处使用 fade-120。",
+].join("\n");
+
+/** 内置默认场景选型提示词（与 config/prompts/default/scene-v2-system.txt 一致） */
+const BUILTIN_SCENE_V2_SYSTEM = [
+  "你是短视频场景编排器。只输出严格 JSON，不要输出任何其他文字。",
+  "任务：为 visualType=component 的镜头从组件注册表中选择组件并填写参数；禁止输出 HTML/CSS/JS。",
+  "可用组件（ID / 类别 / 名称 / 参数）：",
+  "{catalog}",
+  "输出结构：",
+  '{"shots":[{"shotId":"sh-001","componentId":"keyword-block","props":{"title":"一句屏上文字","underline":"sweep"}}]}',
+  "要求：每个 component 镜头恰好一条；只使用清单中的组件 ID 与参数键；",
+  "文本只能压缩镜头口播或屏上文字，不得新增事实；参数超长或非法枚举会被拒绝并降级。",
 ].join("\n");
 
 /** 内置默认文生图强制后缀（与 config/prompts/default/image-suffix.txt 一致） */
@@ -41,8 +71,12 @@ export interface PromptSet {
   /** 集名（config/prompts/<集名>/ 目录名；default 为默认集） */
   name: string;
   copySystem: string;
+  /** 契约 v2 的文案提示词（一句一镜）；v1 项目不会使用。 */
+  copyV2System: string;
   imageSuffix: string;
   sceneSystem: string;
+  /** 契约 v2 的场景选型提示词（只选组件填参数）；v1 项目不会使用。 */
+  sceneV2System: string;
   /** file：至少一个文件来自 config/prompts 目录；builtin：全部回退内置默认 */
   source: "file" | "builtin";
 }
@@ -80,8 +114,10 @@ export function loadPromptSet(options: { rootDir: string; setName?: string }): P
     return {
       name,
       copySystem: BUILTIN_COPY_SYSTEM,
+      copyV2System: BUILTIN_COPY_V2_SYSTEM,
       imageSuffix: BUILTIN_IMAGE_SUFFIX,
       sceneSystem: BUILTIN_SCENE_SYSTEM,
+      sceneV2System: BUILTIN_SCENE_V2_SYSTEM,
       source: "builtin",
     };
   }
@@ -91,15 +127,23 @@ export function loadPromptSet(options: { rootDir: string; setName?: string }): P
     return existsSync(path) ? readFileSync(path, "utf-8").trim() : undefined;
   };
   const copySystem = read("copy-system.txt");
+  const copyV2System = read("copy-v2-system.txt");
   const imageSuffix = read("image-suffix.txt");
   const sceneSystem = read("scene-system.txt");
+  const sceneV2System = read("scene-v2-system.txt");
   return {
     name,
     copySystem: copySystem ?? BUILTIN_COPY_SYSTEM,
+    copyV2System: copyV2System ?? BUILTIN_COPY_V2_SYSTEM,
     imageSuffix: imageSuffix ?? BUILTIN_IMAGE_SUFFIX,
     sceneSystem: sceneSystem ?? BUILTIN_SCENE_SYSTEM,
+    sceneV2System: sceneV2System ?? BUILTIN_SCENE_V2_SYSTEM,
     source:
-      copySystem !== undefined || imageSuffix !== undefined || sceneSystem !== undefined
+      copySystem !== undefined ||
+      copyV2System !== undefined ||
+      imageSuffix !== undefined ||
+      sceneSystem !== undefined ||
+      sceneV2System !== undefined
         ? "file"
         : "builtin",
   };

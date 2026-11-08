@@ -14,6 +14,8 @@ import { adminListRunStages } from "../../db/repositories/run-stage-repository.j
 import { adminListLlmCalls, adminListToolCalls } from "../../db/repositories/trace-repository.js";
 import { adminListProjects } from "../../db/repositories/project-repository.js";
 import { adminListUsers, adminResetPassword } from "../../db/repositories/user-repository.js";
+import { adminListLoginEvents } from "../../db/repositories/login-event-repository.js";
+import { summarizeAdminOverview } from "../../domain/admin-overview.js";
 
 /**
  * 管理 API（见设计文档 §4.3）。全部路由需 Bearer 鉴权且首行 `requireAdmin`，
@@ -57,6 +59,32 @@ function parsePaging(query: unknown): { limit: number; offset: number } {
  */
 export function registerAdminRoutes(app: FastifyInstance, deps: HttpDeps): void {
   const authPreHandler = createAuthPreHandler(app);
+
+  /**
+   * 管理总览（4 个 KPI，只读）。
+   * 口径固定见 `summarizeAdminOverview`：本周运行按本地时区周一 00:00，
+   * 成功率 = done/(done+failed)，canceled 不计入，basis 返回可复算的计数。
+   */
+  app.get("/api/admin/overview", { preHandler: authPreHandler }, async (request, reply) => {
+    const actor = requireActor(request);
+    requireAdmin(actor);
+    const users = adminListUsers(deps.db, actor);
+    const projects = adminListProjects(deps.db, actor);
+    const runs = adminListRuns(deps.db, actor);
+    const overview = summarizeAdminOverview({ users, projects, runs });
+    reply.code(200);
+    return overview;
+  });
+
+  /** 最近登录日志（只读，追加式记录；默认 100 条）。 */
+  app.get("/api/admin/login-events", { preHandler: authPreHandler }, async (request, reply) => {
+    const actor = requireActor(request);
+    requireAdmin(actor);
+    const rawLimit = Number((request.query as { limit?: unknown } | undefined)?.limit);
+    const limit = Number.isInteger(rawLimit) && rawLimit > 0 ? rawLimit : 100;
+    reply.code(200);
+    return { events: adminListLoginEvents(deps.db, actor, limit) };
+  });
 
   /** 全站用户列表（经 `toPublicUser` 剥离合法的密码哈希字段）。 */
   app.get("/api/admin/users", { preHandler: authPreHandler }, async (request, reply) => {

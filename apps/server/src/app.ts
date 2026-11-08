@@ -1,7 +1,9 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import multipart from "@fastify/multipart";
+import fastifyStatic from "@fastify/static";
 import { mkdir } from "node:fs/promises";
-import { resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { loadSystemConfig } from "@videoforge/pipeline";
@@ -30,6 +32,7 @@ import {
 import { recoverInterruptedRuns } from "./workflow/lease.js";
 import { listStageArtifacts } from "./workflow/breakpoint.js";
 import { getCapability } from "./workflow/capabilities.js";
+import { runQualityGate } from "./domain/quality-gate.js";
 import { createEventBus, type EventBus } from "./http/event-bus.js";
 import { registerHttpRoutes } from "./http/index.js";
 import type { ChatPort, HttpDeps } from "./http/deps.js";
@@ -268,10 +271,20 @@ function createStageExecutor(options: { db: any; sessions: AgentSessionRegistry 
  */
 function forwardWorkflowEvent(eventBus: EventBus, event: WorkflowEvent): void {
   switch (event.type) {
-    case "run_started":
-      // 受控偏差①：不下发 fromStage
-      eventBus.publish(event.sessionId, "run_start", { runId: event.runId, trigger: "auto" });
+    case "run_started": {
+      // 镜头级重生成的 scope 随 run_start 下发；整片 run 为 null
+      const scope = (event.payload?.scope ?? null) as
+        | { shotIds?: string[]; fromStage?: string }
+        | null;
+      eventBus.publish(event.sessionId, "run_start", {
+        runId: event.runId,
+        trigger: "auto",
+        fromStage: scope?.fromStage,
+        shotIds: scope?.shotIds,
+        scope,
+      });
       break;
+    }
     case "stage_started":
       eventBus.publish(event.sessionId, "run_stage", {
         runId: event.runId,
@@ -351,6 +364,21 @@ export async function createApp(options: CreateAppOptions): Promise<FastifyInsta
   await app.register(multipart, {
     limits: { files: 1, fileSize: options.deps.config.assets.max_upload_bytes },
   });
+
+  // Player 静态 bundle（T208）：`apps/player/dist`（vite lib 构建）挂在 /player/ 前缀；
+  // 产物未构建时跳过注册（GET /api/player 入口仍可用，HTML 引用的脚本 404 由错误态兜底）
+  const playerDist = resolve(options.deps.rootDir, "apps", "player", "dist");
+  if (existsSync(join(playerDist, "player.js"))) {
+    await app.register(fastifyStatic, {
+      root: playerDist,
+      prefix: "/player/",
+      decorateReply: false,
+    });
+  } else {
+    console.warn(
+      "[app] apps/player/dist/player.js 不存在，跳过 /player/ 静态服务（先运行 pnpm --filter @videoforge/player build）",
+    );
+  }
 
   // 健康检查：集成测试与冷启动探活依赖该端点
   app.get("/health", async () => ({ status: "ok", service: "videoforge-server" }));
@@ -443,12 +471,17 @@ export async function startServer(
       config,
       traceForActor,
       onSessionEvent: (sessionId, event) => publishAgentSessionEvent(eventBus, sessionId, event),
+      // v2 阶段事件（asset.bound / preview.ready）直通 SSE 总线（T204）
+      onProjectEvent: (sessionId, type, payload) => {
+        eventBus.publish(sessionId, type as Parameters<typeof eventBus.publish>[1], payload);
+      },
     });
 
     // 11) 阶段执行器：驱动 agent 会话并回报产物清单
     const executeStage = createStageExecutor({ db, sessions: runtime.sessions });
 
-    // 12) 工作流引擎：事件出口接到 SSE 事件总线；阶段状态变更同步双写 trace.jsonl
+    // 12) 工作流引擎：事件出口接到 SSE 事件总线；阶段状态变更同步双写 trace.jsonl；
+    //     v2 项目 compose 完成后执行质检门禁（T207）：报告落盘 + quality.updated 推送
     const workflow = createWorkflowEngine({
       db,
       storageRoot: config.runtime.storage_root,
@@ -458,6 +491,20 @@ export async function startServer(
       onStageChange: (record) => {
         const { actor, ...stage } = record;
         traceForActor(actor).recordStage(stage);
+      },
+      onStageCompleted: async ({ run, project, projectDir, stage }) => {
+        if (project.contract_version !== "2.0" || stage !== "compose") return;
+        const gate = await runQualityGate({
+          projectDir,
+          runId: run.id,
+          profile: project.profile,
+          ffmpegPath: config.tools.ffmpeg_path,
+        });
+        eventBus.publish(run.session_id, "quality.updated", {
+          runId: run.id,
+          projectId: project.id,
+          summary: gate.summary,
+        });
       },
     });
 

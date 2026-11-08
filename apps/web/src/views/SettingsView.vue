@@ -74,8 +74,8 @@ async function onSubmit(): Promise<void> {
     formRef.value?.clearValidate();
     console.info("[web] 密码修改成功");
     if (forced.value) {
-      // 强制改密完成后 mustChangePassword 已归零，回到默认落地页
-      await router.replace("/projects");
+      // 强制改密完成后 mustChangePassword 已归零，回到默认落地页（能力中心，方案 §8.4）
+      await router.replace("/");
     }
   } catch (error) {
     message.error(formatApiError(error));

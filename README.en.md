@@ -8,17 +8,17 @@
 [![pnpm](https://img.shields.io/badge/pnpm-10.x-orange)](https://pnpm.io)
 
 A **local-first AI video generation harness for Windows**. Built around the **Capability → Project → Run**
-domain, it drives a deterministic seven-stage pipeline
-(`copy → images → scenes → TTS → storyboard → render → compose`) from a capability registry, executes each
-stage through an embedded Pi agent runtime, and records a three-level trace (`run_stages` / `tool_calls` /
+domain, it drives a deterministic eight-stage pipeline
+(`copy → images → scenes → TTS → captions → storyboard → render → compose`) from a capability registry, executes
+each stage through an embedded Pi agent runtime, and records a three-level trace (`run_stages` / `tool_calls` /
 `llm_calls`) into both SQLite and a per-project `trace.jsonl`.
 
-> 中文简介：本项目是一个面向 Windows 本机的本地 AI 视频生成 harness，按能力注册表驱动七阶段确定性流水线，
+> 中文简介：本项目是一个面向 Windows 本机的本地 AI 视频生成 harness，按能力注册表驱动八阶段确定性流水线，
 > 内嵌 Pi agent 运行时执行阶段工具，并把三级留痕同时写入 SQLite 与项目目录下的 `trace.jsonl`。
 
 ## Highlights
 
-- **Deterministic seven-stage workflow** — stage order, tool names and artifact checks come from the
+- **Deterministic eight-stage workflow** — stage order, tool names and artifact checks come from the
   capability declaration; the engine hard-codes no stage knowledge.
 - **Embedded agent runtime** — powered by `@earendil-works/pi-coding-agent`. Stage tools accept no path
   parameters; the project directory is injected by the runtime.
@@ -36,11 +36,11 @@ stage through an embedded Pi agent runtime, and records a three-level trace (`ru
 ```mermaid
 flowchart LR
   Web[apps/web<br/>Vue 3 workbench] -->|REST + SSE| Server[apps/server<br/>Fastify 5]
-  Server --> Workflow[workflow<br/>seven-stage engine]
+  Server --> Workflow[workflow<br/>eight-stage engine]
   Workflow --> Agent[agent<br/>Pi runtime / stage tools]
-  Agent --> Pipeline[packages/pipeline<br/>Ark / ffmpeg / copy / image / TTS]
-  Agent --> Renderer[packages/renderer<br/>Playwright frame rendering]
-  Agent --> SDK[packages/template-sdk<br/>scene contract / GSAP]
+  Agent --> Pipeline[packages/pipeline<br/>Ark / ffmpeg / copy / image / scene / TTS / captions / timeline]
+  Agent --> Engine[packages/remotion-engine<br/>Remotion frame rendering]
+  Agent --> SDK[packages/template-sdk<br/>profiles / component registry]
   Server --> DB[(SQLite<br/>Drizzle)]
   Server --> Trace[trace.jsonl]
   CLI[apps/cli<br/>ops commands] --> Server
@@ -49,16 +49,18 @@ flowchart LR
 ```text
 apps/
   server/           Fastify API, workflow engine, agent runtime, trace, SQLite
-  web/              Vue 3 workbench (/login /projects /projects/:id /runs/:id/trace /settings /admin)
+  web/              Vue 3 workbench (/login / (capability center) /projects /projects/:id
+                    /projects/:id/storyboard /projects/:id/runs/:runId /assets /components /settings /admin)
+  player/           React + @remotion/player single-shot previewer (IIFE, served by the data-inlined route)
   cli/              doctor / status / db:migrate / db:user / storage:prune / project:verify
 packages/
-  shared/           domain types, capability registry, error codes
-  pipeline/         config, Ark client, ffmpeg/ffprobe, copy/image/TTS/storyboard/compose
-  renderer/         Playwright single-scene and multi-scene frame rendering
-  template-sdk/     scene contract, built-in animation templates, profiles, GSAP vendoring
-config/             default config, local config template, prompt sets, output profiles
+  shared/           domain types and v2 contracts, capability registry, error codes
+  pipeline/         config, Ark client, ffmpeg/ffprobe, copy/image/scene/TTS/captions/timeline/compose, quality checks
+  remotion-engine/  Remotion frame-driven rendering (theme resolution, component assembly, renderShots/renderShotStill)
+  template-sdk/     output profiles and component registry
+config/             default config, local config template, prompt sets, output profiles, themes and component fixtures
 tests/              Vitest unit tests (tests/integration is the real-machine smoke suite, excluded by default)
-docs/               developer/operator guides, Pi SDK notes, design documents (Chinese)
+docs/               developer/operator guides, Pi SDK notes, design documents and the refactoring plan (Chinese)
 ```
 
 ## Requirements
@@ -67,7 +69,8 @@ docs/               developer/operator guides, Pi SDK notes, design documents (C
 - **pnpm 10.x** (run `corepack enable` to honor the `packageManager` field).
 - **Windows 10/11** as the primary and verified platform; Linux/macOS are untested.
 - **ffmpeg / ffprobe** available on `PATH`, or absolute paths configured in `config/system.local.yaml`.
-- **Chromium** managed by Playwright (`pnpm exec playwright install chromium` on first use if needed).
+- **Chromium**: Remotion renders through your local Chrome or a downloaded `chrome-headless-shell`; point
+  `tools.chromium_path` in `config/system.local.yaml` at a local Chrome binary if needed.
 - A **Volcengine Ark** account for copy generation, images and TTS (`ARK_API_KEY` plus a usable model ID).
 
 ## Quick Start
@@ -110,8 +113,8 @@ The initial account is `admin`; its password is the built-in default or the valu
 - The Ark `base_url` **must stay** `https://ark.cn-beijing.volces.com/api/plan/v3`; switching to `/api/v3`
   incurs additional billing.
 - While `chat_model` is the placeholder `PLEASE_FILL_CHAT_MODEL_ID`, the `copy` stage refuses to run.
-- Prompts are configurable: three template files under `config/prompts/<set>/`; the default set is chosen by
-  `prompts.default_set`.
+- Prompts are configurable: five template files under `config/prompts/<set>/` (copy v1/v2, image suffix,
+  scene v1/v2); the default set is chosen by `prompts.default_set`.
 - Agent behavior switches: `agent.allow_shell_write_edit` (default `true`, grants `bash` / `write` / `edit`),
   `agent.show_thinking` (default `true`, streams and persists model reasoning), and
   `agent.tool_output_preview_chars` (default `8192`, range 256-65536, tool output preview cap, truncated above).
@@ -126,18 +129,19 @@ The initial account is `admin`; its password is the built-in default or the valu
 
 ## Commands
 
-| Command                                     | Description                                        |
-| ------------------------------------------- | -------------------------------------------------- |
-| `pnpm install`                              | Install workspace dependencies                     |
-| `pnpm run doctor`                           | Environment and config self-check (JSON summary)   |
-| `pnpm run server:dev`                       | Start the API (requires `JWT_SECRET`)              |
-| `pnpm run web:dev`                          | Start the Vite dev server for the workbench        |
-| `pnpm test`                                 | Run all unit tests                                 |
-| `pnpm run test:coverage`                    | Run tests with coverage                            |
-| `pnpm run typecheck`                        | `tsc --noEmit` for server / cli / packages         |
-| `pnpm run format` / `pnpm run format:check` | Prettier write / check                             |
-| `pnpm build`                                | Build all packages and the web app                 |
-| `pnpm test:smoke`                           | Real-Chromium smoke test (not part of `pnpm test`) |
+| Command                                     | Description                                                            |
+| ------------------------------------------- | ---------------------------------------------------------------------- |
+| `pnpm install`                              | Install workspace dependencies                                         |
+| `pnpm run doctor`                           | Environment and config self-check (JSON summary)                       |
+| `pnpm run server:dev`                       | Start the API (requires `JWT_SECRET`)                                  |
+| `pnpm run web:dev`                          | Start the Vite dev server for the workbench                            |
+| `pnpm test`                                 | Run all unit tests                                                     |
+| `pnpm run test:coverage`                    | Run tests with coverage                                                |
+| `pnpm run typecheck`                        | `tsc --noEmit` for server / cli / player / packages                    |
+| `pnpm run format` / `pnpm run format:check` | Prettier write / check                                                 |
+| `pnpm build`                                | Build all packages and the web app                                     |
+| `pnpm test:smoke`                           | Real-Chromium smoke test (not part of `pnpm test`)                     |
+| `pnpm test:bench`                           | Real-Chromium render benchmark (`VF_BENCH=1`, not part of `pnpm test`) |
 
 CLI ops commands (`apps/cli`): `status`, `db:migrate`, `db:user`, `storage:prune`, `project:verify`.
 stdout carries a single machine-readable JSON line, diagnostics go to stderr; unknown commands exit with 2,
@@ -166,8 +170,6 @@ More screens in `design-mockups/` (login, project list, capability center, admin
   public interface.
 - `agent.allow_shell_write_edit` defaults to `true`, which grants the agent `bash` / `write` / `edit`.
   Disable it if you do not need those capabilities.
-- Scene generation copies `gsap.min.js` into each project's `vendor/` directory; redistributing generated
-  output is subject to GreenSock's license terms.
 - Never commit secrets, tokens, `.env.local`, `config/system.local.yaml`, SQLite databases or generated
   artifacts.
 - Please report vulnerabilities privately as described in [SECURITY.md](SECURITY.md); never paste secrets in
@@ -177,6 +179,8 @@ More screens in `design-mockups/` (login, project list, capability center, admin
 
 - End-to-end validation against the real Ark service is still manual; `pnpm test:smoke` only covers the real
   Chromium rendering segment.
+- Projects on contract version 1.0 cannot be resumed: the legacy rendering channel has been removed, so
+  create a new project with the current version instead.
 - `POST /api/runs/:id/cancel` marks the run `canceled` and cooperatively aborts the in-flight agent turn (the
   LLM request is aborted and the engine checks the cancel flag at stage boundaries); tool calls already
   dispatched to a subprocess may still finish.
@@ -186,7 +190,7 @@ More screens in `design-mockups/` (login, project list, capability center, admin
 
 ## Roadmap
 
-- [ ] Hard subprocess cancellation (ffmpeg / Playwright interrupts)
+- [ ] Hard subprocess cancellation (ffmpeg / Remotion interrupts)
 - [ ] Raw event-stream table and replay
 - [ ] More output formats and custom profiles
 - [ ] ESLint rule set and stricter CI quality gates
@@ -212,6 +216,8 @@ Most design and guide documents are written in Chinese:
 - [Local harness design](docs/本地视频流水线Agent-v2.md)
 - [Web workbench design](docs/本地视频流水线Agent-web-v2.md)
 - [Harness rebuild plan](docs/superpowers/plans/2026-10-25-videoforge-harness-rebuild.md)
+- [v2 refactoring plan (Chinese)](docs/v2_refactoring/VideoForge重构方案.md)
+- [v2 refactoring task board (Chinese)](docs/v2_refactoring/tasks.md)
 - [Pi Agent SDK notes](docs/notes/pi-sdk-api.md)
 
 ## License
@@ -224,5 +230,5 @@ Most design and guide documents are written in Chinese:
 - [Fastify](https://fastify.dev/), [Drizzle ORM](https://orm.drizzle.team/),
   [better-sqlite3](https://github.com/WiseLibs/better-sqlite3)
 - [Vue 3](https://vuejs.org/), [Vite](https://vite.dev/), [Ant Design Vue](https://www.antdv.com/)
-- [FFmpeg](https://ffmpeg.org/), [Playwright](https://playwright.dev/), [GSAP](https://gsap.com/)
+- [FFmpeg](https://ffmpeg.org/), [Remotion](https://www.remotion.dev/)
 - Volcengine Ark for language, image and speech capabilities

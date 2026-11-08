@@ -103,9 +103,12 @@ const artifacts = computed(() =>
   })),
 );
 
-/** trace 锚链目标（带阶段查询参数，trace 页据此预选阶段）。 */
+/** trace 锚链目标（T307 新路由；无项目上下文时回退旧路由自动重定向）。 */
 const traceTarget = computed(() => ({
-  path: `/runs/${props.runId ?? ""}/trace`,
+  path:
+    props.project?.id && props.runId
+      ? `/projects/${props.project.id}/runs/${props.runId}`
+      : `/runs/${props.runId ?? ""}/trace`,
   query: props.tool.stage ? { stage: props.tool.stage } : {},
 }));
 

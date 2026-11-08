@@ -133,6 +133,15 @@ export interface AgentSessionRegistryOptions {
    * 由上层映射为 SSE 事件。缺省不订阅。
    */
   onSessionEvent?: (sessionId: string, event: AgentSessionEvent) => void;
+  /**
+   * 项目级事件出口（T204）：阶段工具发布的 `asset.bound` / `preview.ready` 等事件
+   * 经此回调转交上层 SSE 总线；`type` 为事件类型字符串（SseEventType），缺省不发布。
+   */
+  onProjectEvent?: (
+    sessionId: string,
+    type: string,
+    payload: Record<string, unknown>,
+  ) => void;
   /** 已注册 Ark provider 的模型运行时。 */
   modelRuntime: ModelRuntime;
   /** 使用的具体模型（由 `runtime.ts` 解析）。 */
@@ -315,7 +324,13 @@ export function createSessionRegistry(options: AgentSessionRegistryOptions): Age
           // projects.profile 是目录名字符串，需转换为内核使用的 OutputProfile 枚举值
           profile: resolveOutputProfile(rootDir, project.profile),
           style: project.style ?? undefined,
+          contractVersion: project.contract_version,
           runId: undefined,
+          // v2 阶段事件（asset.bound / preview.ready）按会话推送；上层未接总线时不发布
+          sessionId,
+          publishEvent: options.onProjectEvent
+            ? (type, payload) => options.onProjectEvent!(sessionId, type, payload)
+            : undefined,
           config,
         },
         builtin: {

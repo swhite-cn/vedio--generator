@@ -5,7 +5,19 @@ import { defineStore } from "pinia";
 import { ref } from "vue";
 import { apiRequest } from "../services/api";
 
-/** 项目（`GET /api/projects` 的 `projects[]` 元素；`status` 为服务端推导值）。 */
+/** 最新 run 的展示摘要（`GET /api/projects` 的 `latestRun`；字段沿用服务端 snake_case）。 */
+export interface ProjectLatestRun {
+  id: string;
+  status: string;
+  trigger?: string;
+  current_stage?: string | null;
+  error_code?: string | null;
+  created_at: string;
+  started_at: string | null;
+  ended_at: string | null;
+}
+
+/** 项目（`GET /api/projects` 的 `projects[]` 元素；`status` 与指标均为服务端推导值）。 */
 export interface Project {
   id: string;
   user_id: string;
@@ -17,6 +29,20 @@ export interface Project {
   status: string;
   created_at: string;
   updated_at: string;
+  /** copy v2 镜头数；v1 项目或产物缺失时为 null（T116）。 */
+  shotCount?: number | null;
+  /** 成片总时长毫秒；缺失时为 null（T116）。 */
+  totalMs?: number | null;
+  /** 镜头平均时长毫秒（T116）。 */
+  averageShotMs?: number | null;
+  /** 流水线进度 0..1，服务端计算（T116）。 */
+  progress?: number;
+  /** 预计剩余秒数；无历史样本时为 null（T116）。 */
+  etaSeconds?: number | null;
+  /** 已绑定资产的镜头数（T116）。 */
+  boundShotCount?: number | null;
+  /** 最新一次 run（无 run 时为 null）。 */
+  latestRun?: ProjectLatestRun | null;
 }
 
 /** 新建项目载荷（`capabilityId` 必填，其余由服务端按能力参数契约校验）。 */

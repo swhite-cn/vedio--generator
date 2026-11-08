@@ -3,7 +3,7 @@
  *
  * 约定：
  * - 一律使用相对路径（`/api/...`），不硬编码主机名与端口，`VITE_API_BASE` 仅作部署覆盖；
- * - access token 存 `localStorage["vf.token"]`，`auth !== false` 时自动注入 `Authorization` 头；
+ * - access token 默认存 `localStorage["vf.token"]`（记住我）；未勾选记住我时存 sessionStorage；
  * - 服务端错误响应体统一为 `{ error: { code, message } }`，此处抛出携带 `code`/`status` 的错误对象；
  * - 收到 401 时清 token 并跳转登录页（登录后回跳）。
  */
@@ -38,35 +38,41 @@ export interface ApiRequestOptions {
 }
 
 /**
- * 读取当前 access token。
+ * 读取当前 access token：先查持久存储（localStorage，记住我），再查会话存储（sessionStorage）。
  * @returns token 字符串；不存在或存储不可用时返回 null
  */
 export function getToken(): string | null {
   try {
-    return localStorage.getItem(TOKEN_KEY);
+    return localStorage.getItem(TOKEN_KEY) ?? sessionStorage.getItem(TOKEN_KEY);
   } catch {
     return null;
   }
 }
 
 /**
- * 写入 access token。
+ * 写入 access token（记住我语义）。
+ * 两侧存储先清空再写入，避免同一 token 残留两份导致登出后仍可读。
  * @param token 待保存的 token
+ * @param persist true 写 localStorage（关闭浏览器仍保持登录）；false 写 sessionStorage（关即失效）
  */
-export function setToken(token: string): void {
+export function setToken(token: string, persist = true): void {
   try {
-    localStorage.setItem(TOKEN_KEY, token);
+    localStorage.removeItem(TOKEN_KEY);
+    sessionStorage.removeItem(TOKEN_KEY);
+    const store = persist ? localStorage : sessionStorage;
+    store.setItem(TOKEN_KEY, token);
   } catch {
     // 存储不可用（隐私模式等）时静默降级，仅影响下次刷新的会话保持。
   }
 }
 
 /**
- * 清除 access token。
+ * 清除 access token（两种存储都清）。
  */
 export function clearToken(): void {
   try {
     localStorage.removeItem(TOKEN_KEY);
+    sessionStorage.removeItem(TOKEN_KEY);
   } catch {
     // 同上，静默降级。
   }

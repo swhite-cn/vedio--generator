@@ -1,8 +1,8 @@
 /**
  * 路由守卫决策纯函数单测（Web 专题 §3.2）。
  *
- * 覆盖五类分支：未登录跳登录并带 redirect、已登录访问 /login 跳 /projects、
- * mustChangePassword 强制跳 /settings?force=1、非 admin 访问仅 admin 页跳 /projects、其余放行。
+ * 覆盖五类分支：未登录跳登录并带 redirect、已登录访问 /login 跳默认页 `/`（能力中心）、
+ * mustChangePassword 强制跳 /settings?force=1、非 admin 访问仅 admin 页跳 `/`、其余放行。
  */
 import { describe, expect, test } from "vitest";
 import { resolveNavigation } from "../../apps/web/src/router-guard";
@@ -39,7 +39,7 @@ describe("resolveNavigation", () => {
         me: { mustChangePassword: false },
         toPath: "/login",
       }),
-    ).toEqual({ path: "/projects", query: {} });
+    ).toEqual({ path: "/", query: {} });
   });
 
   test("forces a user who must change password to the settings page", () => {
@@ -102,13 +102,13 @@ describe("resolveNavigation", () => {
         toPath: "/admin",
         requiresAdmin: true,
       }),
-    ).toEqual({ path: "/projects", query: {} });
+    ).toEqual({ path: "/", query: {} });
   });
 
   test("redirects a user whose role is not loaded away from an admin-only page", () => {
     expect(
       resolveNavigation({ isAuthenticated: true, me: null, toPath: "/admin", requiresAdmin: true }),
-    ).toEqual({ path: "/projects", query: {} });
+    ).toEqual({ path: "/", query: {} });
   });
 
   test("lets a non-admin user through a non-admin page", () => {

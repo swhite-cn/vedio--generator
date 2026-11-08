@@ -12,8 +12,18 @@ export type ArtifactPredicate =
       kind: "file";
       /** 相对项目工作区根目录的路径，如 `copy.json`。 */
       relativePath: string;
-      /** 可选内置契约校验器标识。 */
-      validator?: "copy-contract" | "timeline-contract";
+      /**
+       * 可选内置契约校验器标识。
+       * - 前缀 `v1` 的校验器只判结构；v2 校验器额外校验跨文件覆盖（cue/字幕/spec）。
+       */
+      validator?:
+        | "copy-contract"
+        | "copy-contract-v2"
+        | "timeline-contract"
+        | "timeline-contract-v2"
+        | "audio-cues"
+        | "captions-ass"
+        | "scene-spec";
     }
   | {
       kind: "glob";

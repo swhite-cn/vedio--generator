@@ -2,6 +2,13 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import type { ArtifactPredicate, CapabilityDeclaration, PipelineStage } from "@videoforge/shared";
 import { assertInsideUserRoot, readCopyDoc } from "@videoforge/pipeline";
+import {
+  assertAudioCueCoverage,
+  assertCaptionsCoverage,
+  assertCopyContractV2,
+  assertSceneSpecCoverage,
+  assertTimelineContractV2,
+} from "./artifact-validators.js";
 
 // ---------------------------------------------------------------------------
 // 产物判据解释器与断点扫描，见设计文档 §6.1、§6.5。
@@ -74,11 +81,32 @@ export function verifyStageArtifact(
     if (predicate.kind === "file") {
       const target = resolveProjectPath(projectDir, predicate.relativePath);
       if (!existsSync(target)) return false;
-      if (predicate.validator === "copy-contract") {
-        readCopyDoc(target);
-      } else if (predicate.validator === "timeline-contract") {
-        // 受控偏差：无 timeline 契约校验器，降级为 JSON 可解析
-        JSON.parse(readFileSync(target, "utf-8"));
+      // v1 校验器只判结构；v2 校验器额外做跨文件覆盖校验（cue/字幕/spec）
+      switch (predicate.validator) {
+        case "copy-contract":
+          readCopyDoc(target);
+          break;
+        case "copy-contract-v2":
+          assertCopyContractV2(target);
+          break;
+        case "timeline-contract":
+          // 受控偏差：v1 无 timeline 契约校验器，降级为 JSON 可解析
+          JSON.parse(readFileSync(target, "utf-8"));
+          break;
+        case "timeline-contract-v2":
+          assertTimelineContractV2(target);
+          break;
+        case "audio-cues":
+          assertAudioCueCoverage(projectDir);
+          break;
+        case "captions-ass":
+          assertCaptionsCoverage(projectDir);
+          break;
+        case "scene-spec":
+          assertSceneSpecCoverage(projectDir);
+          break;
+        default:
+          break;
       }
       return true;
     }
